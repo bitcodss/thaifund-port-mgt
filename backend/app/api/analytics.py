@@ -2,14 +2,17 @@
 Portfolio + fund analytics endpoints.
 """
 from datetime import date
+from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import extract, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.database import get_db
 from app.models.portfolio import Portfolio, PortfolioAiSummary
+from app.models.transaction import Transaction
 from app.models.user import User
 from app.schemas.analytics import (
     AiSummary, AllocationResult, FundPerformance, FundRiskMetrics,
@@ -170,3 +173,75 @@ async def fund_nav_history(
 ):
     rows = await perf.get_fund_nav_history(fund_code.upper(), db, days=min(days, 1500))
     return rows
+
+
+@router.get("/analytics/dividends")
+async def user_dividend_summary(
+    year: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """
+    Dividend income grouped by fund across all user's portfolios.
+    Optional ?year=YYYY filter. Returns [{fund_code, gross, tax_withheld, net}].
+    """
+    port_result = await db.execute(
+        select(Portfolio.id).where(Portfolio.user_id == user.id)
+    )
+    portfolio_ids = [r[0] for r in port_result.all()]
+    if not portfolio_ids:
+        return []
+
+    q = (
+        select(
+            Transaction.fund_code,
+            func.sum(Transaction.amount).label("gross"),
+            func.sum(Transaction.tax_withheld).label("tax_withheld"),
+        )
+        .where(
+            Transaction.portfolio_id.in_(portfolio_ids),
+            Transaction.type == "DIVIDEND",
+            Transaction.fund_code.isnot(None),
+        )
+    )
+    if year is not None:
+        q = q.where(extract("year", Transaction.date) == year)
+
+    q = q.group_by(Transaction.fund_code).order_by(func.sum(Transaction.amount).desc())
+    result = await db.execute(q)
+
+    return [
+        {
+            "fund_code": r.fund_code,
+            "gross": str(round(Decimal(str(r.gross)), 2)),
+            "tax_withheld": str(round(Decimal(str(r.tax_withheld)), 2)),
+            "net": str(round(Decimal(str(r.gross)) - Decimal(str(r.tax_withheld)), 2)),
+        }
+        for r in result.all()
+        if r.fund_code
+    ]
+
+
+@router.get("/analytics/dividend-years")
+async def user_dividend_years(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Return distinct years that have DIVIDEND transactions for this user."""
+    port_result = await db.execute(
+        select(Portfolio.id).where(Portfolio.user_id == user.id)
+    )
+    portfolio_ids = [r[0] for r in port_result.all()]
+    if not portfolio_ids:
+        return []
+
+    result = await db.execute(
+        select(extract("year", Transaction.date).label("yr"))
+        .where(
+            Transaction.portfolio_id.in_(portfolio_ids),
+            Transaction.type == "DIVIDEND",
+        )
+        .distinct()
+        .order_by(extract("year", Transaction.date).desc())
+    )
+    return [int(r.yr) for r in result.all()]

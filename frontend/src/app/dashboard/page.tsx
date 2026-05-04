@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   api, clearToken,
-  type Portfolio, type CurrentUser, type PortfolioSummary, type HoldingRow,
+  type Portfolio, type CurrentUser, type PortfolioSummary, type HoldingRow, type DividendSummaryItem,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -167,24 +167,27 @@ export default function DashboardPage() {
     return { topGainers: ranked.slice(0, 8), topLosers: ranked.slice(-8).reverse() };
   }, [allHoldings, retField]);
 
-  // Dividend summary across all portfolios
-  const dividendRows = useMemo(() => {
-    const map: Record<string, { fund_code: string; gross: number; net: number; cost: number }> = {};
-    for (const h of allHoldings) {
-      const gross = Number(h.dividends_gross ?? 0);
-      if (gross <= 0) continue;
-      const key = h.fund_code;
-      if (!map[key]) map[key] = { fund_code: h.fund_code, gross: 0, net: 0, cost: 0 };
-      map[key].gross += gross;
-      map[key].net += Number(h.dividends_net ?? 0);
-      map[key].cost += Number(h.cost_basis ?? 0);
-    }
-    return Object.values(map).sort((a, b) => b.net - a.net);
-  }, [allHoldings]);
+  // Dividend summary — year filter
+  const currentYear = new Date().getFullYear();
+  const [dividendYear, setDividendYear] = useState<number>(currentYear);
+  const [dividendYears, setDividendYears] = useState<number[]>([]);
+  const [dividendRows, setDividendRows] = useState<DividendSummaryItem[]>([]);
+
+  // Fetch available years once portfolios are loaded
+  useEffect(() => {
+    if (portfolios.length === 0) return;
+    api.getDividendYears().then(setDividendYears).catch(() => {});
+  }, [portfolios]);
+
+  // Fetch dividend data whenever year changes
+  useEffect(() => {
+    if (portfolios.length === 0) return;
+    api.getDividendSummary(dividendYear).then(setDividendRows).catch(() => {});
+  }, [dividendYear, portfolios]);
 
   const dividendTotals = useMemo(() => ({
-    gross: dividendRows.reduce((s, r) => s + r.gross, 0),
-    net: dividendRows.reduce((s, r) => s + r.net, 0),
+    gross: dividendRows.reduce((s, r) => s + Number(r.gross), 0),
+    net: dividendRows.reduce((s, r) => s + Number(r.net), 0),
   }), [dividendRows]);
 
   // Allocation
@@ -575,49 +578,66 @@ export default function DashboardPage() {
         )}
 
         {/* ── Dividend Summary ── */}
-        {dividendRows.length > 0 && (
+        {(dividendRows.length > 0 || dividendYears.length > 0) && (
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-semibold">Dividend Income (All Portfolios)</CardTitle>
+              <div className="flex items-center justify-between gap-2">
+                <CardTitle className="text-sm font-semibold">Dividend Income (All Portfolios)</CardTitle>
+                {dividendYears.length > 0 && (
+                  <div className="flex gap-1 flex-wrap justify-end">
+                    {dividendYears.map((y) => (
+                      <button
+                        key={y}
+                        onClick={() => setDividendYear(y)}
+                        className={`text-xs px-2 py-0.5 rounded border transition-colors ${
+                          dividendYear === y
+                            ? "bg-primary text-primary-foreground border-primary"
+                            : "text-muted-foreground border-muted hover:bg-muted"
+                        }`}
+                      >
+                        {y}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </CardHeader>
             <CardContent className="p-0">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b bg-muted/40">
-                    <th className="px-3 py-2 text-left font-medium text-muted-foreground">Fund</th>
-                    <th className="px-3 py-2 text-right font-medium text-muted-foreground">Gross</th>
-                    <th className="px-3 py-2 text-right font-medium text-muted-foreground">Tax</th>
-                    <th className="px-3 py-2 text-right font-medium text-muted-foreground">Net</th>
-                    <th className="px-3 py-2 text-right font-medium text-muted-foreground">Yield (net/cost)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {dividendRows.map((r) => {
-                    const tax = r.gross - r.net;
-                    const yieldPct = r.cost > 0 ? (r.net / r.cost) * 100 : null;
-                    return (
-                      <tr key={r.fund_code} className="border-b hover:bg-muted/30">
-                        <td className="px-3 py-2 font-mono font-medium">{r.fund_code}</td>
-                        <td className="px-3 py-2 text-right tabular-nums">{fmtBaht(r.gross)}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{fmtBaht(tax)}</td>
-                        <td className="px-3 py-2 text-right tabular-nums font-medium text-green-600 dark:text-green-400">{fmtBaht(r.net)}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-                          {yieldPct !== null ? `${yieldPct.toFixed(2)}%` : "–"}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-                <tfoot>
-                  <tr className="border-t bg-muted/30 font-medium">
-                    <td className="px-3 py-2">Total</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{fmtBaht(dividendTotals.gross)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{fmtBaht(dividendTotals.gross - dividendTotals.net)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-green-600 dark:text-green-400">{fmtBaht(dividendTotals.net)}</td>
-                    <td className="px-3 py-2" />
-                  </tr>
-                </tfoot>
-              </table>
+              {dividendRows.length === 0 ? (
+                <p className="px-3 py-4 text-xs text-muted-foreground">No dividend income in {dividendYear}.</p>
+              ) : (
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b bg-muted/40">
+                      <th className="px-3 py-2 text-left font-medium text-muted-foreground">Fund</th>
+                      <th className="px-3 py-2 text-right font-medium text-muted-foreground">Gross</th>
+                      <th className="px-3 py-2 text-right font-medium text-muted-foreground">Tax</th>
+                      <th className="px-3 py-2 text-right font-medium text-muted-foreground">Net</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dividendRows.map((r) => {
+                      const tax = Number(r.tax_withheld);
+                      return (
+                        <tr key={r.fund_code} className="border-b hover:bg-muted/30">
+                          <td className="px-3 py-2 font-mono font-medium">{r.fund_code}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{fmtBaht(Number(r.gross))}</td>
+                          <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{fmtBaht(tax)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums font-medium text-green-600 dark:text-green-400">{fmtBaht(Number(r.net))}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr className="border-t bg-muted/30 font-medium">
+                      <td className="px-3 py-2">Total</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{fmtBaht(dividendTotals.gross)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{fmtBaht(dividendTotals.gross - dividendTotals.net)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-green-600 dark:text-green-400">{fmtBaht(dividendTotals.net)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              )}
             </CardContent>
           </Card>
         )}

@@ -110,6 +110,13 @@ export const api = {
   refreshAiSummary: (portfolioId: string) =>
     request<AiSummary>("POST", `/portfolios/${portfolioId}/analytics/ai-summary/refresh`),
 
+  // Dividend summary (across all portfolios)
+  getDividendSummary: (year?: number) =>
+    request<DividendSummaryItem[]>(
+      "GET", `/analytics/dividends${year !== undefined ? `?year=${year}` : ""}`,
+    ),
+  getDividendYears: () => request<number[]>("GET", "/analytics/dividend-years"),
+
   // CSV import
   importCsv: async (portfolioId: string, file: File) => {
     const token = getToken();
@@ -293,6 +300,13 @@ export interface AiSummary {
   portfolio_id: string;
   content: string;
   generated_at: string;
+}
+
+export interface DividendSummaryItem {
+  fund_code: string;
+  gross: string;
+  tax_withheld: string;
+  net: string;
 }
 
 export interface LotEligibility {
