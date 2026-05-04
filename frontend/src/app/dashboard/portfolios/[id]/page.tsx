@@ -996,11 +996,18 @@ function ReturnCell({ value }: { value: string | null | undefined }) {
   );
 }
 
+type PerfSortKey =
+  | "fund_code" | "latest_nav"
+  | "returns_7d" | "returns_30d" | "returns_6m" | "returns_1y" | "returns_ytd" | "returns_max"
+  | "sharpe_ratio" | "max_drawdown" | "annualized_volatility";
+
 function FundPerformanceSection({ holdings }: { holdings: HoldingRow[] }) {
   const fundCodes = Array.from(new Set(holdings.map((h) => h.fund_code)));
   const [perf, setPerf] = useState<Record<string, FundPerformance>>({});
   const [risk, setRisk] = useState<Record<string, FundRiskMetrics>>({});
   const [loading, setLoading] = useState(true);
+  const [sortKey, setSortKey] = useState<PerfSortKey>("returns_max");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
   // Build since_date map from holdings (oldest lot per fund_code)
   const sinceDateMap: Record<string, string | undefined> = {};
@@ -1011,8 +1018,6 @@ function FundPerformanceSection({ holdings }: { holdings: HoldingRow[] }) {
     }
   }
 
-  // Stable key that encodes both fund codes and their since dates so the effect
-  // re-fires when entry dates change, not just when the set of funds changes.
   const sinceDatesKey = fundCodes.map((c) => `${c}:${sinceDateMap[c] ?? ""}`).join(",");
 
   useEffect(() => {
@@ -1042,26 +1047,81 @@ function FundPerformanceSection({ holdings }: { holdings: HoldingRow[] }) {
     </p>
   );
 
+  function getValue(code: string, key: PerfSortKey): number | null {
+    const p = perf[code];
+    const r = risk[code];
+    if (!p) return null;
+    switch (key) {
+      case "fund_code":              return null; // handled as string sort below
+      case "latest_nav":             return p.latest_nav ? Number(p.latest_nav) : null;
+      case "returns_7d":             return p.returns_7d ? Number(p.returns_7d) : null;
+      case "returns_30d":            return p.returns_30d ? Number(p.returns_30d) : null;
+      case "returns_6m":             return p.returns_6m ? Number(p.returns_6m) : null;
+      case "returns_1y":             return p.returns_1y ? Number(p.returns_1y) : null;
+      case "returns_ytd":            return p.returns_ytd ? Number(p.returns_ytd) : null;
+      case "returns_max":            return p.returns_max ? Number(p.returns_max) : null;
+      case "sharpe_ratio":           return r?.sharpe_ratio ? Number(r.sharpe_ratio) : null;
+      case "max_drawdown":           return r?.max_drawdown ? Number(r.max_drawdown) : null;
+      case "annualized_volatility":  return r?.annualized_volatility ? Number(r.annualized_volatility) : null;
+    }
+  }
+
+  const sorted = [...fundCodes].sort((a, b) => {
+    if (sortKey === "fund_code") {
+      return sortDir === "asc" ? a.localeCompare(b) : b.localeCompare(a);
+    }
+    const av = getValue(a, sortKey);
+    const bv = getValue(b, sortKey);
+    if (av === null && bv === null) return 0;
+    if (av === null) return 1;   // nulls last
+    if (bv === null) return -1;
+    return sortDir === "asc" ? av - bv : bv - av;
+  });
+
+  function toggleSort(key: PerfSortKey) {
+    if (sortKey === key) setSortDir((d) => d === "asc" ? "desc" : "asc");
+    else { setSortKey(key); setSortDir("desc"); }
+  }
+
+  function SortIcon({ col }: { col: PerfSortKey }) {
+    if (sortKey !== col) return <ArrowUpDown className="h-3 w-3 ml-1 opacity-30 inline" />;
+    return sortDir === "asc"
+      ? <ArrowUp className="h-3 w-3 ml-1 inline" />
+      : <ArrowDown className="h-3 w-3 ml-1 inline" />;
+  }
+
+  function Th({ col, children, right, title }: { col: PerfSortKey; children: React.ReactNode; right?: boolean; title?: string }) {
+    return (
+      <th
+        title={title}
+        onClick={() => toggleSort(col)}
+        className={`px-2 py-2 font-medium cursor-pointer select-none hover:text-foreground whitespace-nowrap ${right ? "text-right" : "text-left"}`}
+      >
+        {children}<SortIcon col={col} />
+      </th>
+    );
+  }
+
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
-          <tr className="border-b bg-muted/50">
-            <th className="px-2 py-2 text-left font-medium">Fund</th>
-            <th className="px-2 py-2 text-right font-medium">Latest NAV</th>
-            <th className="px-2 py-2 text-right font-medium">7D</th>
-            <th className="px-2 py-2 text-right font-medium">30D</th>
-            <th className="px-2 py-2 text-right font-medium">6M</th>
-            <th className="px-2 py-2 text-right font-medium">1Y</th>
-            <th className="px-2 py-2 text-right font-medium">YTD</th>
-            <th className="px-2 py-2 text-right font-medium" title="Since first current holding date">MAX*</th>
-            <th className="px-2 py-2 text-right font-medium">Sharpe</th>
-            <th className="px-2 py-2 text-right font-medium">MaxDD</th>
-            <th className="px-2 py-2 text-right font-medium">Volatility</th>
+          <tr className="border-b bg-muted/50 text-muted-foreground text-xs">
+            <Th col="fund_code">Fund</Th>
+            <Th col="latest_nav" right>Latest NAV</Th>
+            <Th col="returns_7d" right>7D</Th>
+            <Th col="returns_30d" right>30D</Th>
+            <Th col="returns_6m" right>6M</Th>
+            <Th col="returns_1y" right>1Y</Th>
+            <Th col="returns_ytd" right>YTD</Th>
+            <Th col="returns_max" right title="Since first current holding date">MAX*</Th>
+            <Th col="sharpe_ratio" right>Sharpe</Th>
+            <Th col="max_drawdown" right>MaxDD</Th>
+            <Th col="annualized_volatility" right>Volatility</Th>
           </tr>
         </thead>
         <tbody>
-          {fundCodes.map((code) => {
+          {sorted.map((code) => {
             const p = perf[code];
             const r = risk[code];
             if (!p) return null;
@@ -1078,7 +1138,6 @@ function FundPerformanceSection({ holdings }: { holdings: HoldingRow[] }) {
                 <ReturnCell value={p.returns_1y} />
                 <ReturnCell value={p.returns_ytd} />
                 <ReturnCell value={p.returns_max} />
-                {/* Risk metrics */}
                 <td className="px-2 py-2 text-right tabular-nums text-xs">
                   {r?.sharpe_ratio ? Number(r.sharpe_ratio).toFixed(2) : "–"}
                 </td>
