@@ -230,6 +230,8 @@ export interface PortfolioSummary {
   total_invested: string;
   xirr: string | null;
   xirr_error: string | null;
+  twr: string | null;
+  twr_error: string | null;
   open_positions: number;
 }
 
@@ -238,6 +240,7 @@ export interface HoldingRow {
   fund_name_en: string | null;
   amc: string | null;
   asset_class: string | null;
+  benchmark: string | null;
   tax_scheme: string;
   units: string;
   cost_basis: string;

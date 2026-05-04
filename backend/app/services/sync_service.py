@@ -216,6 +216,15 @@ async def sync_fund_metadata(db: AsyncSession) -> dict:
         asset_class = _policy_to_asset_class(policy.get("policy_desc") if policy else None)
         volatility_by_class = _latest_volatility_by_class(perf_rows)
 
+        # Extract benchmark name from policy response (try known field names)
+        benchmark_name: str | None = None
+        if policy:
+            for field in ("ref_index_desc", "benchmark_name", "benchmark", "ref_index"):
+                val = policy.get(field)
+                if val and str(val).strip():
+                    benchmark_name = str(val).strip()
+                    break
+
         # Update all funds (parent + classes) that share this proj_id
         siblings_result = await db.execute(
             select(Fund).where(Fund.sec_proj_id == proj_id)
@@ -223,6 +232,8 @@ async def sync_fund_metadata(db: AsyncSession) -> dict:
         for sibling in siblings_result.scalars().all():
             if asset_class:
                 sibling.asset_class = asset_class
+            if benchmark_name and not sibling.benchmark:
+                sibling.benchmark = benchmark_name
             # Use class-specific volatility if available, else use any available value
             vol = volatility_by_class.get(sibling.fund_code)
             if vol is None and volatility_by_class:

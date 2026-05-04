@@ -143,10 +143,17 @@ function SummarySection({ summary }: { summary: PortfolioSummary }) {
       subClass: "text-muted-foreground",
       valueClass: summary.xirr ? pnlClass(summary.xirr) : "text-muted-foreground",
     },
+    {
+      label: "TWR (Time-Weighted)",
+      value: summary.twr ? fmtXirr(summary.twr) : summary.twr_error ?? "–",
+      sub: "Annualized return",
+      subClass: "text-muted-foreground",
+      valueClass: summary.twr ? pnlClass(summary.twr) : "text-muted-foreground",
+    },
   ];
 
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
       {cards.map((c) => (
         <Card key={c.label}>
           <CardContent className="pt-4 pb-3">
@@ -1003,6 +1010,8 @@ type PerfSortKey =
 
 function FundPerformanceSection({ holdings }: { holdings: HoldingRow[] }) {
   const fundCodes = Array.from(new Set(holdings.map((h) => h.fund_code)));
+  const benchmarkMap: Record<string, string | null> = {};
+  for (const h of holdings) benchmarkMap[h.fund_code] = h.benchmark ?? null;
   const [perf, setPerf] = useState<Record<string, FundPerformance>>({});
   const [risk, setRisk] = useState<Record<string, FundRiskMetrics>>({});
   const [loading, setLoading] = useState(true);
@@ -1118,6 +1127,7 @@ function FundPerformanceSection({ holdings }: { holdings: HoldingRow[] }) {
             <Th col="sharpe_ratio" right>Sharpe</Th>
             <Th col="max_drawdown" right>MaxDD</Th>
             <Th col="annualized_volatility" right>Volatility</Th>
+            <th className="px-2 py-2 font-medium text-left whitespace-nowrap">Benchmark</th>
           </tr>
         </thead>
         <tbody>
@@ -1146,6 +1156,9 @@ function FundPerformanceSection({ holdings }: { holdings: HoldingRow[] }) {
                 </td>
                 <td className="px-2 py-2 text-right tabular-nums text-xs">
                   {r?.annualized_volatility ? `${(Number(r.annualized_volatility) * 100).toFixed(1)}%` : "–"}
+                </td>
+                <td className="px-2 py-2 text-xs text-muted-foreground max-w-[160px] truncate" title={benchmarkMap[code] ?? undefined}>
+                  {benchmarkMap[code] ?? "–"}
                 </td>
               </tr>
             );
@@ -1471,7 +1484,7 @@ export default function PortfolioPage() {
                     </div>
                   </div>
                 )}
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                   <div className="space-y-1">
                     <Label>Amount (฿) {needsUnitsNav && <span className="text-xs text-muted-foreground font-normal">auto</span>}</Label>
                     <Input type="number" step="any" placeholder="0.00" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} required />

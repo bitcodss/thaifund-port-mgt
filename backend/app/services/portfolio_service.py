@@ -227,6 +227,7 @@ async def get_holdings(portfolio_id: UUID, db: AsyncSession) -> list[HoldingRow]
             fund_name_en=fund.name_en if fund else None,
             amc=fund.amc if fund else None,
             asset_class=fund.asset_class if fund else None,
+            benchmark=fund.benchmark if fund else None,
             tax_scheme=row.tax_scheme,
             units=units,
             cost_basis=cost,
@@ -308,6 +309,7 @@ async def get_summary(portfolio_id: UUID, db: AsyncSession) -> PortfolioSummary:
     total_invested = Decimal(str(inv_result.scalar() or 0)).quantize(QUANT)
 
     xirr_val, xirr_err = await compute_xirr(portfolio_id, db, total_value)
+    twr_val, twr_err = await compute_twr(portfolio_id, db)
 
     summary = PortfolioSummary(
         portfolio_id=portfolio_id,
@@ -320,10 +322,111 @@ async def get_summary(portfolio_id: UUID, db: AsyncSession) -> PortfolioSummary:
         total_invested=total_invested,
         xirr=xirr_val,
         xirr_error=xirr_err,
+        twr=twr_val,
+        twr_error=twr_err,
         open_positions=len(holdings),
     )
     _cache_set(key, summary)
     return summary
+
+
+# ── TWR ───────────────────────────────────────────────────────────────────────
+
+async def compute_twr(
+    portfolio_id: UUID,
+    db: AsyncSession,
+) -> tuple[Decimal | None, str | None]:
+    """
+    Time-Weighted Return for open positions, annualized.
+    Chains sub-period HPRs between each transaction date, eliminating
+    the timing effect of cash flows.
+    Returns (annualized_twr, error_code).
+    """
+    result = await db.execute(
+        select(TaxLot.fund_code, TaxLot.units_remaining, TaxLot.original_purchase_date)
+        .where(TaxLot.portfolio_id == portfolio_id, TaxLot.units_remaining > 0)
+    )
+    lots = result.all()
+    if not lots:
+        return None, "no_positions"
+
+    fund_codes = list({lot.fund_code for lot in lots})
+
+    tx_result = await db.execute(
+        select(Transaction.date)
+        .where(Transaction.portfolio_id == portfolio_id)
+        .distinct()
+        .order_by(Transaction.date)
+    )
+    tx_dates = sorted({row.date for row in tx_result.all()})
+    if not tx_dates:
+        return None, "no_cashflows"
+
+    today = date.today()
+    boundaries = tx_dates + ([today] if tx_dates[-1] != today else [])
+    if len(boundaries) < 2:
+        return None, "no_cashflows"
+
+    start_date = boundaries[0]
+    total_days = (boundaries[-1] - start_date).days
+    if total_days <= 0:
+        return None, "no_history"
+
+    nav_result = await db.execute(
+        select(NavHistory.fund_code, NavHistory.trade_date, NavHistory.nav)
+        .where(NavHistory.fund_code.in_(fund_codes), NavHistory.trade_date >= start_date)
+        .order_by(NavHistory.fund_code, NavHistory.trade_date)
+    )
+    # nav_lookup[fund_code] = sorted list of (trade_date, nav)
+    nav_lookup: dict[str, list[tuple[date, Decimal]]] = {}
+    for row in nav_result.all():
+        nav_lookup.setdefault(row.fund_code, []).append((row.trade_date, row.nav))
+
+    def nav_on_or_before(fund_code: str, d: date) -> Decimal | None:
+        entries = nav_lookup.get(fund_code)
+        if not entries:
+            return None
+        lo, hi = 0, len(entries) - 1
+        idx = -1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if entries[mid][0] <= d:
+                idx = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return entries[idx][1] if idx >= 0 else None
+
+    twr_factor = Decimal("1")
+    had_valid_period = False
+
+    for i in range(len(boundaries) - 1):
+        d_start, d_end = boundaries[i], boundaries[i + 1]
+        v_start = Decimal("0")
+        v_end = Decimal("0")
+        for lot in lots:
+            if lot.original_purchase_date > d_start:
+                continue
+            units = Decimal(str(lot.units_remaining))
+            ns = nav_on_or_before(lot.fund_code, d_start)
+            ne = nav_on_or_before(lot.fund_code, d_end)
+            if ns is None or ne is None:
+                continue
+            v_start += units * ns
+            v_end += units * ne
+        if v_start <= 0:
+            continue
+        twr_factor *= v_end / v_start
+        had_valid_period = True
+
+    if not had_valid_period or twr_factor <= 0:
+        return None, "no_nav"
+
+    try:
+        annualized = Decimal(str((float(twr_factor) ** (365.25 / total_days)) - 1))
+        return annualized.quantize(QUANT), None
+    except Exception:
+        return None, "convergence"
 
 
 # ── XIRR ──────────────────────────────────────────────────────────────────────

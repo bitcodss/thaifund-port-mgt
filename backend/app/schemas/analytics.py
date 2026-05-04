@@ -10,6 +10,7 @@ class HoldingRow(BaseModel):
     fund_name_en: str | None
     amc: str | None
     asset_class: str | None
+    benchmark: str | None = None
     tax_scheme: str
     units: Decimal
     cost_basis: Decimal
@@ -42,6 +43,8 @@ class PortfolioSummary(BaseModel):
     total_invested: Decimal
     xirr: Decimal | None
     xirr_error: str | None
+    twr: Decimal | None
+    twr_error: str | None
     open_positions: int
 
 
