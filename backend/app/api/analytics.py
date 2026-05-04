@@ -1,0 +1,172 @@
+"""
+Portfolio + fund analytics endpoints.
+"""
+from datetime import date
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_user
+from app.database import get_db
+from app.models.portfolio import Portfolio, PortfolioAiSummary
+from app.models.user import User
+from app.schemas.analytics import (
+    AiSummary, AllocationResult, FundPerformance, FundRiskMetrics,
+    HoldingRow, LotEligibility, NavPoint, PortfolioSummary,
+)
+from app.services import portfolio_service as ps
+from app.services import performance_service as perf
+from app.services import ai_service
+
+router = APIRouter(tags=["analytics"])
+
+
+async def _check_portfolio_access(portfolio_id: UUID, user: User, db: AsyncSession) -> Portfolio:
+    from sqlalchemy import select
+    result = await db.execute(
+        select(Portfolio).where(Portfolio.id == portfolio_id, Portfolio.user_id == user.id)
+    )
+    p = result.scalar_one_or_none()
+    if not p:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+    return p
+
+
+@router.get("/portfolios/{portfolio_id}/analytics/summary", response_model=PortfolioSummary)
+async def portfolio_summary(
+    portfolio_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    await _check_portfolio_access(portfolio_id, user, db)
+    return await ps.get_summary(portfolio_id, db)
+
+
+@router.get("/portfolios/{portfolio_id}/analytics/holdings", response_model=list[HoldingRow])
+async def portfolio_holdings(
+    portfolio_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    await _check_portfolio_access(portfolio_id, user, db)
+    return await ps.get_holdings(portfolio_id, db)
+
+
+@router.get("/portfolios/{portfolio_id}/analytics/allocation", response_model=AllocationResult)
+async def portfolio_allocation(
+    portfolio_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    await _check_portfolio_access(portfolio_id, user, db)
+    return await ps.get_allocation(portfolio_id, db)
+
+
+@router.get("/portfolios/{portfolio_id}/analytics/tax-eligibility", response_model=list[LotEligibility])
+async def tax_eligibility(
+    portfolio_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    await _check_portfolio_access(portfolio_id, user, db)
+    return await ps.get_tax_eligibility(portfolio_id, db, date.today(), user.date_of_birth)
+
+
+@router.get("/portfolios/{portfolio_id}/analytics/ai-summary", response_model=AiSummary)
+async def get_ai_summary(
+    portfolio_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    await _check_portfolio_access(portfolio_id, user, db)
+    existing = await db.get(PortfolioAiSummary, portfolio_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="No AI summary yet — click Refresh to generate")
+    return AiSummary(
+        portfolio_id=portfolio_id,
+        content=existing.content,
+        generated_at=existing.generated_at,
+    )
+
+
+@router.post("/portfolios/{portfolio_id}/analytics/ai-summary/refresh", response_model=AiSummary)
+async def refresh_ai_summary(
+    portfolio_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    await _check_portfolio_access(portfolio_id, user, db)
+    data = await _build_ai_data(portfolio_id, db)
+    content = await ai_service.generate_summary(portfolio_id, data, db)
+    await db.commit()
+    from datetime import datetime, timezone
+    return AiSummary(portfolio_id=portfolio_id, content=content, generated_at=datetime.now(timezone.utc))
+
+
+async def _build_ai_data(portfolio_id: UUID, db: AsyncSession) -> dict:
+    """Collect summary + holdings + risk metrics into a dict for the AI prompt."""
+    summary = await ps.get_summary(portfolio_id, db)
+    holdings = await ps.get_holdings(portfolio_id, db)
+
+    holdings_data = []
+    for h in holdings:
+        perf_data = await perf.get_fund_performance(h.fund_code, db, since_date=h.fund_entry_date)
+        risk_data = await perf.get_fund_risk_metrics(h.fund_code, db)
+        holdings_data.append({
+            "fund": h.fund_code,
+            "scheme": h.tax_scheme,
+            "entry_cost": float(h.entry_cost_in_fund) if h.entry_cost_in_fund else float(h.cost_basis),
+            "market_value": float(h.market_value) if h.market_value else None,
+            "fund_return_pct": float(h.fund_pnl_pct) if h.fund_pnl_pct else None,
+            "days_held_in_fund": (
+                (date.today() - h.fund_entry_date).days
+                if h.fund_entry_date else h.holding_days
+            ),
+            "return_7d_pct": float(perf_data.returns_7d) * 100 if perf_data.returns_7d else None,
+            "return_30d_pct": float(perf_data.returns_30d) * 100 if perf_data.returns_30d else None,
+            "return_1y_pct": float(perf_data.returns_1y) * 100 if perf_data.returns_1y else None,
+            "return_since_entry_pct": float(perf_data.returns_max) * 100 if perf_data.returns_max else None,
+            "sharpe": float(risk_data.sharpe_ratio) if risk_data.sharpe_ratio else None,
+            "max_drawdown_pct": float(risk_data.max_drawdown) * 100 if risk_data.max_drawdown else None,
+            "volatility_pct": float(risk_data.annualized_volatility) * 100 if risk_data.annualized_volatility else None,
+        })
+
+    return {
+        "total_market_value": float(summary.total_market_value) if summary.total_market_value else None,
+        "total_cost_basis": float(summary.total_cost_basis),
+        "unrealized_pnl": float(summary.unrealized_pnl) if summary.unrealized_pnl else None,
+        "unrealized_pnl_pct": float(summary.unrealized_pnl_pct) if summary.unrealized_pnl_pct else None,
+        "xirr_pct": float(summary.xirr) * 100 if summary.xirr else None,
+        "holdings": holdings_data,
+    }
+
+
+@router.get("/funds/{fund_code}/performance", response_model=FundPerformance)
+async def fund_performance(
+    fund_code: str,
+    since_date: date | None = None,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return await perf.get_fund_performance(fund_code.upper(), db, since_date=since_date)
+
+
+@router.get("/funds/{fund_code}/risk-metrics", response_model=FundRiskMetrics)
+async def fund_risk_metrics(
+    fund_code: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    return await perf.get_fund_risk_metrics(fund_code.upper(), db)
+
+
+@router.get("/funds/{fund_code}/nav-history", response_model=list[NavPoint])
+async def fund_nav_history(
+    fund_code: str,
+    days: int = 365,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    rows = await perf.get_fund_nav_history(fund_code.upper(), db, days=min(days, 1500))
+    return rows
