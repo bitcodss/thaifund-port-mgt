@@ -13,6 +13,7 @@ from app.api import sync as sync_router_module
 from app.api import analytics as analytics_router_module
 from app.database import AsyncSessionLocal
 from app.services import sync_service
+from app.services.portfolio_service import clear_all_cache
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ async def _nightly_nav_sync():
         try:
             result = await sync_service.sync_nav_for_date(db, date.today())
             logger.info("Scheduled NAV sync: %s", result)
+            clear_all_cache()
         except Exception:
             logger.exception("Scheduled NAV sync failed")
 
@@ -35,6 +37,7 @@ async def _weekly_metadata_sync():
         try:
             result = await sync_service.sync_fund_metadata(db)
             logger.info("Scheduled metadata sync: %s", result)
+            clear_all_cache()
         except Exception:
             logger.exception("Scheduled metadata sync failed")
 
@@ -45,12 +48,23 @@ async def _daily_dividend_sync():
         try:
             result = await sync_service.sync_dividends(db)
             logger.info("Scheduled dividend sync: %s", result)
+            clear_all_cache()
         except Exception:
             logger.exception("Scheduled dividend sync failed")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Mark any sync_jobs rows left in 'running' status by a crashed prior
+    # process as 'error'. Otherwise they show up as phantom in-progress jobs.
+    async with AsyncSessionLocal() as db:
+        try:
+            cleaned = await sync_service.cleanup_stale_running_jobs(db)
+            if cleaned:
+                logger.info("Marked %d stale sync_jobs as error on startup", cleaned)
+        except Exception:
+            logger.exception("Stale sync_jobs cleanup failed")
+
     scheduler.add_job(_nightly_nav_sync, CronTrigger(day_of_week="mon-fri", hour=12, minute=30))
     scheduler.add_job(_weekly_metadata_sync, CronTrigger(day_of_week="sun", hour=1, minute=0))
     scheduler.add_job(_daily_dividend_sync, CronTrigger(hour=13, minute=30))

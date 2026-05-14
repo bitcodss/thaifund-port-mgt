@@ -108,6 +108,28 @@ async def _finish_job(db: AsyncSession, job: SyncJob, error: str | None = None, 
     await db.flush()
 
 
+async def cleanup_stale_running_jobs(db: AsyncSession) -> int:
+    """
+    Mark any sync_jobs row stuck in 'running' status as 'error'. Called on app
+    startup so that jobs left dangling by a crashed previous process don't
+    permanently show as in-progress on the /sync/jobs page.
+
+    Returns the number of rows updated. We don't add a time-since-started
+    threshold here because by definition a `running` row at startup is stale
+    (no in-process scheduler holds it).
+    """
+    result = await db.execute(select(SyncJob).where(SyncJob.status == "running"))
+    stale = list(result.scalars().all())
+    now = datetime.now(timezone.utc)
+    for job in stale:
+        job.completed_at = now
+        job.status = "error"
+        job.error_message = "process terminated while job was running"
+    if stale:
+        await db.commit()
+    return len(stale)
+
+
 async def _funds_with_proj_id(db: AsyncSession, active_only: bool = False) -> Sequence[Fund]:
     q = select(Fund).where(Fund.sec_proj_id.isnot(None))
     if active_only:

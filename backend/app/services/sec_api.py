@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import date
 from typing import Any
 
@@ -43,6 +44,9 @@ class _ThrottledClient:
     - enforces a minimum interval between requests
     - retries on 421/429 with Retry-After
     - raises SecApiUnauthorizedError on 401 so callers can degrade gracefully
+
+    Per-key state lives here. Use module-level _client_for() to share state
+    across calls — instantiating a new client per call defeats the throttler.
     """
 
     def __init__(self, api_key: str):
@@ -52,11 +56,11 @@ class _ThrottledClient:
 
     async def get(self, url: str) -> Any | None:
         async with self._lock:
-            now = asyncio.get_event_loop().time()
+            now = time.monotonic()
             gap = _REQUEST_INTERVAL - (now - self._last_call)
             if gap > 0:
                 await asyncio.sleep(gap)
-            self._last_call = asyncio.get_event_loop().time()
+            self._last_call = time.monotonic()
 
         headers = {"Ocp-Apim-Subscription-Key": self._key}
         for attempt in range(_MAX_RETRIES):
@@ -93,12 +97,23 @@ class _ThrottledClient:
         return None
 
 
+# Module-level per-key client registry. Without this, the throttler state
+# (_last_call) resets on every call — defeating the rate limit entirely.
+_clients: dict[str, _ThrottledClient] = {}
+
+
+def _client_for(key: str) -> _ThrottledClient:
+    """Return the shared throttled client for this API key, creating it lazily."""
+    if key not in _clients:
+        _clients[key] = _ThrottledClient(key)
+    return _clients[key]
+
+
 # ── FundDailyInfo API ─────────────────────────────────────────────────────────
 
 async def list_amcs(key: str) -> list[dict]:
     """GET /FundDailyInfo/amc → all 27 AMCs with unique_id."""
-    client = _ThrottledClient(key)
-    result = await client.get(f"{DAILY_INFO_BASE}/amc")
+    result = await _client_for(key).get(f"{DAILY_INFO_BASE}/amc")
     return result or []
 
 
@@ -108,9 +123,8 @@ async def get_daily_nav(key: str, proj_id: str, nav_date: date) -> dict | list |
     Returns a list of dicts (one per share class) with keys: last_val, previous_val, etc.
     Some older endpoints return a single dict. Returns None on weekend/holiday (HTTP 204).
     """
-    client = _ThrottledClient(key)
     date_str = nav_date.strftime("%Y-%m-%d")
-    return await client.get(f"{DAILY_INFO_BASE}/{proj_id}/dailynav/{date_str}")
+    return await _client_for(key).get(f"{DAILY_INFO_BASE}/{proj_id}/dailynav/{date_str}")
 
 
 async def get_dividends(key: str, proj_id: str) -> list[dict]:
@@ -119,8 +133,7 @@ async def get_dividends(key: str, proj_id: str) -> list[dict]:
     Returns list of dividend events with keys:
       book_close_date, dividend_date, dividend_value, unit_base
     """
-    client = _ThrottledClient(key)
-    result = await client.get(f"{DAILY_INFO_BASE}/{proj_id}/dividend")
+    result = await _client_for(key).get(f"{DAILY_INFO_BASE}/{proj_id}/dividend")
     return result or []
 
 
@@ -128,8 +141,7 @@ async def get_dividends(key: str, proj_id: str) -> list[dict]:
 
 async def list_factsheet_amcs(key: str) -> list[dict]:
     """GET /FundFactsheet/fund/amc → all AMCs registered with SEC (superset of FundDailyInfo list)."""
-    client = _ThrottledClient(key)
-    result = await client.get(f"{FACTSHEET_BASE}/fund/amc")
+    result = await _client_for(key).get(f"{FACTSHEET_BASE}/fund/amc")
     return result or []
 
 
@@ -140,15 +152,13 @@ async def list_amc_funds(key: str, amc_unique_id: str) -> list[dict]:
     fund_status, regis_date, cancel_date.
     Raises SecApiUnauthorizedError if not subscribed to FundFactsheet.
     """
-    client = _ThrottledClient(key)
-    result = await client.get(f"{FACTSHEET_BASE}/fund/amc/{amc_unique_id}")
+    result = await _client_for(key).get(f"{FACTSHEET_BASE}/fund/amc/{amc_unique_id}")
     return result or []
 
 
 async def get_fund_policy(key: str, proj_id: str) -> dict | None:
     """GET /FundFactsheet/fund/{proj_id}/policy → policy_desc (asset class in Thai), management_style."""
-    client = _ThrottledClient(key)
-    return await client.get(f"{FACTSHEET_BASE}/fund/{proj_id}/policy")
+    return await _client_for(key).get(f"{FACTSHEET_BASE}/fund/{proj_id}/policy")
 
 
 async def get_fund_performance(key: str, proj_id: str) -> list[dict]:
@@ -157,6 +167,5 @@ async def get_fund_performance(key: str, proj_id: str) -> list[dict]:
     Returns list of rows with class_abbr_name, performance_type_desc, performance_val, as_of_date.
     Filter for rows where performance_type_desc contains 'ผันผวน' to get annualised volatility.
     """
-    client = _ThrottledClient(key)
-    result = await client.get(f"{FACTSHEET_BASE}/fund/{proj_id}/performance")
+    result = await _client_for(key).get(f"{FACTSHEET_BASE}/fund/{proj_id}/performance")
     return result or []

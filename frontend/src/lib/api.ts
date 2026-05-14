@@ -13,6 +13,15 @@ export function clearToken() {
   localStorage.removeItem("token");
 }
 
+function handleAuthFailure(): never {
+  clearToken();
+  if (typeof window !== "undefined") {
+    // Hard redirect (not router.push) so all in-flight component state is dropped.
+    window.location.href = "/login";
+  }
+  throw new Error("Session expired");
+}
+
 async function request<T>(
   method: string,
   path: string,
@@ -29,6 +38,7 @@ async function request<T>(
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  if (res.status === 401 && auth) handleAuthFailure();
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail ?? "Request failed");
@@ -133,6 +143,7 @@ export const api = {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       body: form,
     });
+    if (res.status === 401) handleAuthFailure();
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       throw new Error(err.detail ?? "Import failed");

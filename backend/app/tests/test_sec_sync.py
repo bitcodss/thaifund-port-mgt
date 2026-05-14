@@ -135,6 +135,93 @@ class TestSecApiClient:
                 await client.get("https://example.com/test")
 
 
+# ── throttler singleton behavior ──────────────────────────────────────────────
+
+class TestThrottlerSingleton:
+    """H6 regression — the throttler must be a process-wide singleton per API key.
+    Otherwise the rate limit isn't actually enforced across separate function calls."""
+
+    def test_client_for_returns_same_instance_for_same_key(self):
+        from app.services.sec_api import _client_for, _clients
+        _clients.clear()
+        a = _client_for("key-A")
+        b = _client_for("key-A")
+        assert a is b
+
+    def test_client_for_returns_distinct_instances_per_key(self):
+        from app.services.sec_api import _client_for, _clients
+        _clients.clear()
+        a = _client_for("key-A")
+        b = _client_for("key-B")
+        assert a is not b
+
+    @pytest.mark.asyncio
+    async def test_two_sequential_calls_share_throttler_state(self):
+        """Two back-to-back calls via public sec_api functions must hit the same
+        client. Without this, _last_call resets every call and rate-limit is a no-op."""
+        from app.services import sec_api
+        from app.services.sec_api import _clients
+        _clients.clear()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = []
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value.__aenter__.return_value.get = AsyncMock(return_value=mock_resp)
+            await sec_api.list_amcs("test-key")
+            client_after_first = _clients["test-key"]
+            await sec_api.list_amcs("test-key")
+            client_after_second = _clients["test-key"]
+        assert client_after_first is client_after_second
+        # Confirms _last_call > 0 — the throttler is actually tracking timing
+        assert client_after_second._last_call > 0
+
+
+# ── stale sync_jobs cleanup ───────────────────────────────────────────────────
+
+class TestCleanupStaleRunningJobs:
+    """H7 regression — sync_jobs left in 'running' status after a crash must be
+    marked 'error' on next app startup. Without this, the /sync/jobs page shows
+    phantom in-progress rows forever."""
+
+    @pytest.mark.asyncio
+    async def test_marks_running_jobs_as_error(self, db):
+        from app.services.sync_service import cleanup_stale_running_jobs
+        db.add_all([
+            SyncJob(
+                id=uuid.uuid4(), type="nav_sync",
+                started_at=datetime.now(timezone.utc), status="running",
+            ),
+            SyncJob(
+                id=uuid.uuid4(), type="dividend_sync",
+                started_at=datetime.now(timezone.utc), status="running",
+            ),
+            SyncJob(
+                id=uuid.uuid4(), type="nav_sync",
+                started_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(timezone.utc),
+                status="success",
+            ),
+        ])
+        await db.commit()
+
+        cleaned = await cleanup_stale_running_jobs(db)
+        assert cleaned == 2
+
+        rows = (await db.execute(select(SyncJob))).scalars().all()
+        statuses = sorted(r.status for r in rows)
+        assert statuses == ["error", "error", "success"]
+        # The two formerly-running rows now have an error_message explaining why
+        error_msgs = [r.error_message for r in rows if r.status == "error"]
+        assert all("terminated" in (m or "") for m in error_msgs)
+
+    @pytest.mark.asyncio
+    async def test_no_running_jobs_returns_zero(self, db):
+        from app.services.sync_service import cleanup_stale_running_jobs
+        cleaned = await cleanup_stale_running_jobs(db)
+        assert cleaned == 0
+
+
 # ── sync_fund_metadata ─────────────────────────────────────────────────────────
 
 class TestSyncFundMetadata:
