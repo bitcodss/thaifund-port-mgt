@@ -21,6 +21,7 @@ from app.schemas.analytics import (
 from app.services import portfolio_service as ps
 from app.services import performance_service as perf
 from app.services import ai_service
+from app.services.clock import today_ict
 
 router = APIRouter(tags=["analytics"])
 
@@ -73,7 +74,7 @@ async def tax_eligibility(
     user: User = Depends(get_current_user),
 ):
     await _check_portfolio_access(portfolio_id, user, db)
-    return await ps.get_tax_eligibility(portfolio_id, db, date.today(), user.date_of_birth)
+    return await ps.get_tax_eligibility(portfolio_id, db, today_ict(), user.date_of_birth)
 
 
 @router.get("/portfolios/{portfolio_id}/analytics/ai-summary", response_model=AiSummary)
@@ -123,7 +124,7 @@ async def _build_ai_data(portfolio_id: UUID, db: AsyncSession) -> dict:
             "market_value": float(h.market_value) if h.market_value else None,
             "fund_return_pct": float(h.fund_pnl_pct) if h.fund_pnl_pct else None,
             "days_held_in_fund": (
-                (date.today() - h.fund_entry_date).days
+                (today_ict() - h.fund_entry_date).days
                 if h.fund_entry_date else h.holding_days
             ),
             "return_7d_pct": float(perf_data.returns_7d) * 100 if perf_data.returns_7d else None,

@@ -5,10 +5,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.models.portfolio import Portfolio
 from app.models.user import User
 from app.schemas.user import SelfUserUpdate, UserCreate, UserOut, UserUpdate
 from app.api.deps import require_admin, get_current_user
 from app.services.auth_service import hash_password, verify_password
+from app.services.portfolio_service import invalidate_portfolio
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -34,10 +36,19 @@ async def update_me(
         if not body.current_password or not verify_password(body.current_password, user.password_hash):
             raise HTTPException(status_code=400, detail="Current password is incorrect")
         user.password_hash = hash_password(body.password)
+    dob_changed = body.date_of_birth is not None and body.date_of_birth != user.date_of_birth
     if body.date_of_birth is not None:
         user.date_of_birth = body.date_of_birth
     await db.commit()
     await db.refresh(user)
+
+    # DOB feeds RMF age-55 eligibility. A change must invalidate the analytics
+    # cache for every portfolio this user owns — otherwise stale eligibility
+    # data is served for up to 5 minutes.
+    if dob_changed:
+        portfolios = await db.execute(select(Portfolio.id).where(Portfolio.user_id == user.id))
+        for (pid,) in portfolios.all():
+            invalidate_portfolio(pid)
     return user
 
 

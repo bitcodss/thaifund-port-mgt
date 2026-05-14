@@ -558,6 +558,44 @@ class TestTwr:
         assert abs(twr - Decimal("3.0")) < Decimal("0.01")
 
 
+# ── cache eviction / key correctness ──────────────────────────────────────────
+
+class TestCacheKeysIncludeDate:
+    """M5 regression — cache keys must include today so the cached snapshot
+    auto-expires when the date rolls over at midnight ICT."""
+
+    @pytest.mark.asyncio
+    async def test_holdings_cache_key_includes_today(self, db):
+        _, portfolio, _ = await _seed_basic(db)
+        db.add(TaxLot(
+            id=uuid.uuid4(), portfolio_id=portfolio.id, fund_code="TESTFUND",
+            original_purchase_date=date(2024, 1, 1),
+            units_remaining=Decimal("100"), cost_basis_remaining=Decimal("1000"),
+            tax_scheme="NORMAL",
+        ))
+        await db.flush()
+
+        ps.clear_all_cache()
+        await ps.get_holdings(portfolio.id, db)
+        # The cache should now contain a key with today's date in it
+        keys = list(ps._cache.keys())
+        assert len(keys) == 1
+        # Format is "{portfolio_id}:holdings:{YYYY-MM-DD}"
+        from app.services.clock import today_ict
+        assert today_ict().isoformat() in keys[0]
+        assert keys[0].endswith(today_ict().isoformat())
+
+    @pytest.mark.asyncio
+    async def test_summary_cache_key_includes_today(self, db):
+        _, portfolio, _ = await _seed_basic(db)
+        ps.clear_all_cache()
+        await ps.get_summary(portfolio.id, db)
+        keys = [k for k in ps._cache.keys() if "summary" in k]
+        assert len(keys) == 1
+        from app.services.clock import today_ict
+        assert keys[0].endswith(today_ict().isoformat())
+
+
 # ── rebuild_lots half-pair test ────────────────────────────────────────────────
 
 class TestRebuildLotsHalfPair:

@@ -27,11 +27,13 @@ async def get_fund_performance(fund_code: str, db: AsyncSession, since_date: dat
     Compute return for standard timeframes using cached NAV history.
     since_date: when provided, MAX return is measured from that date (first holding date).
     """
+    # Pull ALL NAVs (no row limit). The 1y anchor needs ~250 trade days back,
+    # which a previous LIMIT 400 just barely covered — gaps could push it out
+    # of the window. There's no good correctness argument for capping the read.
     result = await db.execute(
         select(NavHistory.trade_date, NavHistory.nav)
         .where(NavHistory.fund_code == fund_code)
         .order_by(NavHistory.trade_date.desc())
-        .limit(400)
     )
     rows = result.all()
 
@@ -45,10 +47,13 @@ async def get_fund_performance(fund_code: str, db: AsyncSession, since_date: dat
 
     latest_nav = rows[0].nav
     latest_date = rows[0].trade_date
-    nav_map: dict[date, Decimal] = {r.trade_date: r.nav for r in rows}
+    # `sorted_dates` is ascending; the binary-search lookup needs that order.
+    sorted_pairs: list[tuple[date, Decimal]] = sorted(
+        ((r.trade_date, r.nav) for r in rows), key=lambda p: p[0]
+    )
 
     def ret(anchor_date: date) -> Decimal | None:
-        nav_at = _nav_on_or_before(nav_map, anchor_date)
+        nav_at = _nav_on_or_before(sorted_pairs, anchor_date)
         if nav_at is None or nav_at == 0:
             return None
         return ((latest_nav - nav_at) / nav_at).quantize(QUANT)
@@ -105,13 +110,22 @@ async def get_fund_nav_history(fund_code: str, db: AsyncSession, days: int = 365
     return [{"date": str(r.trade_date), "nav": float(r.nav)} for r in reversed(rows)]
 
 
-def _nav_on_or_before(nav_map: dict[date, Decimal], anchor: date) -> Decimal | None:
-    """Find the most recent NAV on or before anchor date from an in-memory map."""
-    for days_back in range(0, 10):
-        d = anchor - timedelta(days=days_back)
-        if d in nav_map:
-            return nav_map[d]
-    return None
+def _nav_on_or_before(sorted_pairs: list[tuple[date, Decimal]], anchor: date) -> Decimal | None:
+    """Find the most recent NAV with trade_date <= anchor. Binary search over
+    a date-ascending list. Replaces a 10-day lookback that was brittle for
+    funds with long quiet periods (Thai market closures, sync gaps)."""
+    if not sorted_pairs:
+        return None
+    lo, hi = 0, len(sorted_pairs) - 1
+    idx = -1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if sorted_pairs[mid][0] <= anchor:
+            idx = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return sorted_pairs[idx][1] if idx >= 0 else None
 
 
 async def get_fund_risk_metrics(fund_code: str, db: AsyncSession) -> FundRiskMetrics:

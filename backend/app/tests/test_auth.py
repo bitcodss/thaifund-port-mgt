@@ -2,6 +2,8 @@
 Auth-hardening tests — covers PR 4 findings M9 (rate limit), M10 (current-
 password gate), and M11 (CORS config parsing).
 """
+from datetime import date
+
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
@@ -167,6 +169,65 @@ class TestSelfUpdatePasswordGate:
         await db.refresh(user)
         assert verify_password("new-stronger-pw", user.password_hash)
         assert not verify_password("original-pw", user.password_hash)
+
+
+# ── M6: DOB change invalidates portfolio analytics cache ──────────────────────
+
+class TestDobChangeInvalidatesCache:
+    @pytest.mark.asyncio
+    async def test_changing_dob_invalidates_users_portfolio_caches(self, db, app_client):
+        import uuid as _uuid
+        from app.models.portfolio import Portfolio
+        from app.services import portfolio_service as ps
+
+        user = User(
+            id=_uuid.uuid4(),
+            email="dob@example.com",
+            password_hash=hash_password("pw"),
+            role="user",
+        )
+        db.add(user)
+        portfolio = Portfolio(id=_uuid.uuid4(), user_id=user.id, name="p1")
+        db.add(portfolio)
+        await db.commit()
+
+        # Seed the cache as if a prior request had populated it.
+        ps._cache_set(f"{portfolio.id}:summary:2026-05-14", "stale-value")
+        ps._cache_set(f"{portfolio.id}:tax:2026-05-14", "stale-tax")
+        assert ps._cache_get(f"{portfolio.id}:summary:2026-05-14") == "stale-value"
+
+        resp = app_client.patch("/api/v1/users/me", json={"date_of_birth": "1990-05-14"})
+        assert resp.status_code == 200, resp.text
+
+        # All cache entries for this portfolio must be gone
+        assert ps._cache_get(f"{portfolio.id}:summary:2026-05-14") is None
+        assert ps._cache_get(f"{portfolio.id}:tax:2026-05-14") is None
+
+    @pytest.mark.asyncio
+    async def test_setting_same_dob_does_not_invalidate(self, db, app_client):
+        """Idempotent updates shouldn't blow the cache — flag if dob_changed
+        is truly false."""
+        import uuid as _uuid
+        from app.models.portfolio import Portfolio
+        from app.services import portfolio_service as ps
+
+        user = User(
+            id=_uuid.uuid4(),
+            email="same@example.com",
+            password_hash=hash_password("pw"),
+            role="user",
+            date_of_birth=date(1990, 5, 14),
+        )
+        db.add(user)
+        portfolio = Portfolio(id=_uuid.uuid4(), user_id=user.id, name="p1")
+        db.add(portfolio)
+        await db.commit()
+
+        ps._cache_set(f"{portfolio.id}:summary:2026-05-14", "keep-me")
+        resp = app_client.patch("/api/v1/users/me", json={"date_of_birth": "1990-05-14"})
+        assert resp.status_code == 200
+        # Same DOB → cache NOT invalidated
+        assert ps._cache_get(f"{portfolio.id}:summary:2026-05-14") == "keep-me"
 
 
 # ── M11: CORS origins parsing ─────────────────────────────────────────────────

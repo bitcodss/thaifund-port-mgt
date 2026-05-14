@@ -21,6 +21,7 @@ from app.models.transaction import Transaction
 from app.schemas.analytics import (
     AllocationItem, AllocationResult, HoldingRow, LotEligibility, PortfolioSummary,
 )
+from app.services.clock import today_ict
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,9 @@ async def _latest_navs_bulk(
 
 async def get_holdings(portfolio_id: UUID, db: AsyncSession) -> list[HoldingRow]:
     """Open lots grouped by (fund_code, tax_scheme) with current NAV."""
-    key = f"{portfolio_id}:holdings"
+    today = today_ict()
+    # `today` in the cache key so the holding_days fields auto-evict at midnight ICT.
+    key = f"{portfolio_id}:holdings:{today.isoformat()}"
     cached = _cache_get(key)
     if cached is not None:
         return cached
@@ -182,7 +185,6 @@ async def get_holdings(portfolio_id: UUID, db: AsyncSession) -> list[HoldingRow]
         if r.fund_code
     }
 
-    today = date.today()
     holdings: list[HoldingRow] = []
     for row in rows:
         units = Decimal(str(row.total_units))
@@ -283,7 +285,8 @@ async def _realized_pnl(portfolio_id: UUID, db: AsyncSession) -> Decimal:
 # ── summary ───────────────────────────────────────────────────────────────────
 
 async def get_summary(portfolio_id: UUID, db: AsyncSession) -> PortfolioSummary:
-    key = f"{portfolio_id}:summary"
+    today = today_ict()
+    key = f"{portfolio_id}:summary:{today.isoformat()}"
     cached = _cache_get(key)
     if cached is not None:
         return cached
@@ -311,7 +314,7 @@ async def get_summary(portfolio_id: UUID, db: AsyncSession) -> PortfolioSummary:
 
     summary = PortfolioSummary(
         portfolio_id=portfolio_id,
-        as_of_date=date.today(),
+        as_of_date=today,
         total_cost_basis=total_cost.quantize(QUANT),
         total_market_value=total_value,
         unrealized_pnl=upnl,
@@ -371,7 +374,7 @@ async def compute_twr(
         return None, "no_cashflows"
 
     boundary_dates = sorted({t.date for t in txs})
-    today = date.today()
+    today = today_ict()
     if boundary_dates[-1] < today:
         boundary_dates.append(today)
     if len(boundary_dates) < 2:
@@ -544,8 +547,8 @@ async def compute_xirr(
     if not cash_flows:
         return None, "no_cashflows"
 
-    # Terminal: current portfolio value as of today
-    today = date.today()
+    # Terminal: current portfolio value as of today (ICT, not server TZ).
+    today = today_ict()
     if current_value > 0:
         cash_flows.append((today, current_value))
 
@@ -561,7 +564,7 @@ async def compute_xirr(
 # ── allocation ────────────────────────────────────────────────────────────────
 
 async def get_allocation(portfolio_id: UUID, db: AsyncSession) -> AllocationResult:
-    key = f"{portfolio_id}:allocation"
+    key = f"{portfolio_id}:allocation:{today_ict().isoformat()}"
     cached = _cache_get(key)
     if cached is not None:
         return cached
