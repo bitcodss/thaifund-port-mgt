@@ -301,6 +301,26 @@ class TestRealizedPnl:
         assert pnl == Decimal("0")
 
     @pytest.mark.asyncio
+    async def test_sell_with_missing_lot_consumptions_is_excluded(self, db):
+        """M8 regression: a SELL transaction with no lot_consumptions row
+        (e.g. inserted via raw SQL bypassing apply_sell) used to count its
+        entire proceeds as 100% gain. The new behavior excludes it and logs."""
+        _, portfolio, _ = await _seed_basic(db)
+        # SELL row with no matching LotConsumption (no apply_sell ran)
+        db.add(Transaction(
+            id=uuid.uuid4(), portfolio_id=portfolio.id,
+            date=date(2025, 6, 1), type="SELL", fund_code="TESTFUND",
+            units=Decimal("100"), nav=Decimal("12"),
+            amount=Decimal("1200"), fee=Decimal("0"),
+            tax_withheld=Decimal("0"), tax_scheme="NORMAL",
+        ))
+        await db.flush()
+
+        pnl = await ps._realized_pnl(portfolio.id, db)
+        # Previously: 1200 - 0 = 1200 (false 100% profit). Now: excluded entirely.
+        assert pnl == Decimal("0")
+
+    @pytest.mark.asyncio
     async def test_sell_with_tax_withheld_subtracts_wht(self, db):
         """WHT must reduce realized P&L — without this fix it inflates gains."""
         _, portfolio, _ = await _seed_basic(db)

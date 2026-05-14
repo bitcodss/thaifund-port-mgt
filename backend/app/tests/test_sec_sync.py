@@ -330,6 +330,9 @@ class TestSyncFundMetadata:
         with (
             patch("app.services.sync_service.settings") as mock_settings,
             patch("app.services.sec_api.list_amcs", new_callable=AsyncMock, return_value=amcs),
+            patch("app.services.sec_api.list_factsheet_amcs", new_callable=AsyncMock, return_value=[]),
+            patch("app.services.sec_api.get_fund_policy", new_callable=AsyncMock, return_value=None),
+            patch("app.services.sec_api.get_fund_performance", new_callable=AsyncMock, return_value=[]),
             patch("app.services.sec_api.list_amc_funds", side_effect=fake_list_amc_funds),
         ):
             mock_settings.factsheet_key = "fake-key"
@@ -347,6 +350,9 @@ class TestSyncFundMetadata:
         with (
             patch("app.services.sync_service.settings") as mock_settings,
             patch("app.services.sec_api.list_amcs", new_callable=AsyncMock, return_value=amcs),
+            patch("app.services.sec_api.list_factsheet_amcs", new_callable=AsyncMock, return_value=[]),
+            patch("app.services.sec_api.get_fund_policy", new_callable=AsyncMock, return_value=None),
+            patch("app.services.sec_api.get_fund_performance", new_callable=AsyncMock, return_value=[]),
             patch("app.services.sec_api.list_amc_funds", new_callable=AsyncMock, return_value=funds),
         ):
             mock_settings.factsheet_key = "fake-key"
@@ -459,7 +465,7 @@ class TestSyncNavForDate:
             result = await sync_service.sync_nav_for_date(db, date(2026, 1, 15))
 
         assert result["synced"] == 0
-        assert "No funds with sec_proj_id" in result["errors"][0]
+        assert "No funds found" in result["errors"][0]
 
     @pytest.mark.asyncio
     async def test_updates_fund_last_nav_date(self, db):

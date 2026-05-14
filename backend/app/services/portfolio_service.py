@@ -274,10 +274,17 @@ async def _realized_pnl(portfolio_id: UUID, db: AsyncSession) -> Decimal:
         )
         raw_cost = lc_result.scalar()
         if raw_cost is None:
-            logger.warning("No lot consumptions found for SELL tx %s — realized P&L may be incorrect", tx.id)
-            cost = Decimal("0")
-        else:
-            cost = Decimal(str(raw_cost))
+            # No audit row means we don't know the cost basis. Previously we
+            # treated this as "cost = 0" and the entire sale counted as profit
+            # — wildly wrong if a manual DB insert ever skipped apply_sell.
+            # Exclude this transaction from the realized total and log loudly
+            # so the admin can reconcile.
+            logger.error(
+                "Realized P&L excluded SELL tx %s: no lot_consumptions audit row found",
+                tx.id,
+            )
+            continue
+        cost = Decimal(str(raw_cost))
         total += proceeds - cost
     return total.quantize(QUANT)
 

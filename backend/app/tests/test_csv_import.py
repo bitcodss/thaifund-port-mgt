@@ -235,6 +235,32 @@ class TestSwitchTargetFundCrossCheck:
         assert any("must differ" in e for e in errors)
 
 
+class TestEncodingFallback:
+    """L8: the API decoder tries utf-8-sig → utf-8 → cp874 → windows-1252.
+    We don't go through the API in this unit-level test; instead verify that
+    a cp874-encoded Thai byte stream round-trips cleanly when decoded with the
+    fallback chain that the endpoint applies."""
+
+    def test_cp874_encoded_thai_round_trips(self):
+        text_with_thai_note = (
+            "date,type,fund_code,units,nav,amount,fee,tax_withheld,target_fund_code,pair_id,tax_scheme,note\n"
+            "2024-01-01,BUY,SCBSET,1000,12.00,12000.00,0,0,,,NORMAL,กองทุนไทย\n"
+        )
+        cp874_bytes = text_with_thai_note.encode("cp874")
+        # Simulate the API's fallback chain:
+        decoded = None
+        for enc in ("utf-8-sig", "utf-8", "cp874", "windows-1252"):
+            try:
+                decoded = cp874_bytes.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        assert decoded is not None
+        rows, errors = parse_csv(StringIO(decoded))
+        assert len(rows) == 1
+        assert rows[0].note == "กองทุนไทย"
+
+
 class TestPositiveNumberValidation:
     def test_negative_units_rejected(self):
         csv = (

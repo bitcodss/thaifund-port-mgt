@@ -224,6 +224,24 @@ class TestBuildSwitchInLots:
         dates = {nl.original_purchase_date for nl in new_lots}
         assert dates == {lot1.original_purchase_date, lot2.original_purchase_date}
 
+    def test_switch_in_total_units_sum_exact(self):
+        """L2 regression: when switch_in_total_units is supplied, sum of
+        new_lots.units_remaining must equal it exactly. Previously two
+        ROUND_HALF_UP quantizations of equal pieces could drift by 1e-8."""
+        # Two consumptions of equal cost basis with an odd target total → naive
+        # half-up quantization on each piece independently would over-allocate.
+        lot1 = lot("FUND_A", date(2022, 1, 1), 500, 5000)
+        lot2 = lot("FUND_A", date(2023, 1, 1), 500, 5000)
+        consumptions = fifo_consume([lot1, lot2], D("1000"))
+        target_units = D("1.00000001")  # odd value; equal halves would round up
+        new_lots = build_switch_in_lots(
+            consumptions, {lot1.id: lot1, lot2.id: lot2},
+            "FUND_B", D("10000"),
+            switch_in_total_units=target_units,
+        )
+        total_units = sum(nl.units_remaining for nl in new_lots)
+        assert total_units == target_units
+
 
 # ── Holding Period ────────────────────────────────────────────────────────────
 

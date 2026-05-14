@@ -14,6 +14,90 @@ from app.services.auth_service import hash_password, verify_password
 from app.services.rate_limit import RateLimiter
 
 
+# ── L5/L6: token decoder semantics ────────────────────────────────────────────
+
+class TestTokenDecoder:
+    """L5: distinguish ExpiredSignatureError from generic invalid token so the
+    API can return a clearer 'session expired' message. L6: a forged token with
+    a non-UUID sub claim must yield 401, not a 500 from UUID() raising."""
+
+    def test_expired_raises_TokenExpired(self):
+        from datetime import datetime, timedelta, timezone
+        from jose import jwt
+        from app.config import settings
+        from app.services.auth_service import TokenExpired, decode_token_strict
+        import pytest as _pytest
+        expired = jwt.encode(
+            {"sub": "user-1", "exp": datetime.now(timezone.utc) - timedelta(minutes=1)},
+            settings.SECRET_KEY, algorithm=settings.ALGORITHM,
+        )
+        with _pytest.raises(TokenExpired):
+            decode_token_strict(expired)
+
+    def test_garbage_token_raises_TokenInvalid(self):
+        from app.services.auth_service import TokenInvalid, decode_token_strict
+        import pytest as _pytest
+        with _pytest.raises(TokenInvalid):
+            decode_token_strict("not-a-real-jwt")
+
+    def test_decode_token_returns_none_for_either_failure(self):
+        """Backwards-compat wrapper still returns None for any failure."""
+        from app.services.auth_service import decode_token
+        assert decode_token("garbage") is None
+
+    @pytest.mark.asyncio
+    async def test_non_uuid_sub_claim_returns_401_not_500(self, db, app_client):
+        """L6 regression: forged token with sub='not-a-uuid' used to crash with
+        500 inside UUID('not-a-uuid'). Now returns 401."""
+        from datetime import datetime, timedelta, timezone
+        from jose import jwt
+        from app.config import settings
+        from app.api.deps import get_current_user
+        from app.main import app
+
+        # Override the dependency to use the real one (the fixture had stubbed it)
+        if get_current_user in app.dependency_overrides:
+            del app.dependency_overrides[get_current_user]
+
+        bad_token = jwt.encode(
+            {"sub": "not-a-uuid", "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
+            settings.SECRET_KEY, algorithm=settings.ALGORITHM,
+        )
+        resp = app_client.get("/api/v1/users/me", headers={"Authorization": f"Bearer {bad_token}"})
+        assert resp.status_code == 401
+
+
+# ── L7: bcrypt 72-byte password cap ────────────────────────────────────────────
+
+class TestPasswordByteLengthValidation:
+    def test_short_password_accepted(self):
+        from app.schemas.user import UserCreate
+        u = UserCreate(email="x@x.com", password="short-pw")
+        assert u.password == "short-pw"
+
+    def test_long_ascii_password_rejected(self):
+        from app.schemas.user import UserCreate
+        import pytest as _pytest
+        long_pw = "a" * 100  # 100 ASCII bytes > 72
+        with _pytest.raises(Exception) as exc_info:
+            UserCreate(email="x@x.com", password=long_pw)
+        assert "bcrypt" in str(exc_info.value) or "72" in str(exc_info.value)
+
+    def test_thai_password_under_72_bytes_accepted(self):
+        """24 Thai characters = 72 bytes UTF-8 — boundary case."""
+        from app.schemas.user import UserCreate
+        pw = "ก" * 24  # 24 × 3 bytes = 72 bytes
+        u = UserCreate(email="x@x.com", password=pw)
+        assert u.password == pw
+
+    def test_thai_password_over_72_bytes_rejected(self):
+        from app.schemas.user import UserCreate
+        import pytest as _pytest
+        pw = "ก" * 25  # 75 bytes
+        with _pytest.raises(Exception):
+            UserCreate(email="x@x.com", password=pw)
+
+
 # ── M9: rate limiter ──────────────────────────────────────────────────────────
 
 class TestLoginRateLimiter:

@@ -113,11 +113,21 @@ def build_switch_in_lots(
     """
     total_cost = sum(c.cost_basis_consumed for c in consumptions)
     new_lots: list[NewLot] = []
-    for c in consumptions:
+    use_total_units = switch_in_total_units is not None and total_cost > 0
+    # When allocating from a fixed total, give the final lot the unallocated
+    # residual so sum(new_lots.units) == switch_in_total_units exactly. Without
+    # this, two ROUND_HALF_UP quantizations of equal pieces can drift by 1e-8.
+    allocated = Decimal("0")
+    last_idx = len(consumptions) - 1
+    for i, c in enumerate(consumptions):
         src = source_lots[c.lot_id]
-        if switch_in_total_units is not None and total_cost > 0:
-            fraction = c.cost_basis_consumed / total_cost
-            new_units = _q(switch_in_total_units * fraction)
+        if use_total_units:
+            if i == last_idx:
+                new_units = switch_in_total_units - allocated
+            else:
+                fraction = c.cost_basis_consumed / total_cost
+                new_units = _q(switch_in_total_units * fraction)
+                allocated += new_units
         else:
             new_units = _q(c.cost_basis_consumed / target_nav)
         new_lots.append(NewLot(

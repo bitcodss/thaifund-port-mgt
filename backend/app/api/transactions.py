@@ -173,7 +173,22 @@ async def import_csv(
     await _get_portfolio_write(portfolio_id, db, user)
 
     content = await file.read()
-    text = io.StringIO(content.decode("utf-8-sig"))  # handle BOM
+    # Excel-on-Windows-Thai exports as TIS-620 / cp874; native UTF-8 with BOM
+    # is the modern default; UTF-8 without BOM also common. Try in priority
+    # order and surface a clear 400 if none stick.
+    decoded: str | None = None
+    for enc in ("utf-8-sig", "utf-8", "cp874", "windows-1252"):
+        try:
+            decoded = content.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if decoded is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Unable to decode CSV — please save the file as UTF-8 and retry",
+        )
+    text = io.StringIO(decoded)
     rows, parse_errors = parse_csv(text)
 
     if not rows and parse_errors:
