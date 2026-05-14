@@ -12,3 +12,4 @@ node_modules/
 .next/
 *.log
 postgres_data/
+tsconfig.tsbuildinfo
