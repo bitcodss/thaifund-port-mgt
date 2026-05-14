@@ -796,3 +796,121 @@ class TestAutoCreateDividendTransactions:
         assert first["auto_dividends_created"] == 1
         assert second["auto_dividends_created"] == 0
         assert second["auto_dividends_skipped"] == 1
+
+
+# ── _run_nav_catchup ──────────────────────────────────────────────────────────
+
+class TestNavCatchup:
+    """Self-healing NAV catch-up: replaces the broken `fetch today, get nothing`
+    nightly scheduler. Asserts behavior of `_run_nav_catchup` in app/main.py."""
+
+    async def _seed_portfolio_fund(self, db: AsyncSession, fund_code: str, proj_id: str):
+        """Need a portfolio + transaction so get_portfolio_proj_ids() picks the fund."""
+        from app.models.portfolio import Portfolio
+        from app.models.transaction import Transaction
+        from app.models.user import User
+
+        await _seed_fund(db, fund_code, proj_id=proj_id)
+        user = User(id=uuid.uuid4(), email=f"{fund_code}@x", password_hash="x", role="user")
+        p = Portfolio(id=uuid.uuid4(), user_id=user.id, name="P")
+        db.add_all([user, p])
+        db.add(Transaction(
+            id=uuid.uuid4(), portfolio_id=p.id, date=date(2024, 1, 1),
+            type="BUY", fund_code=fund_code, units=Decimal("100"),
+            nav=Decimal("10"), amount=Decimal("1000"),
+            fee=Decimal("0"), tax_withheld=Decimal("0"), tax_scheme="NORMAL",
+        ))
+        await db.commit()
+
+    @pytest.mark.asyncio
+    async def test_empty_portfolio_is_a_no_op(self, db):
+        """No portfolio funds → return early, no SEC calls, no sync_jobs row."""
+        from app.main import nav_catchup
+        # Patch sec_api so a stray call would blow up loudly
+        with patch("app.services.sync_service.sec_api.get_daily_nav",
+                   new=AsyncMock(side_effect=AssertionError("should not be called"))):
+            with patch("app.services.sync_service.settings") as mock_settings:
+                mock_settings.SEC_API_KEY = "fake-key"
+                await nav_catchup(db)
+        jobs = (await db.execute(select(SyncJob))).scalars().all()
+        assert jobs == []
+
+    @pytest.mark.asyncio
+    async def test_backfills_gap_from_last_nav_to_yesterday(self, db):
+        """Portfolio fund with NAV up to D-5: catch-up backfills D-4 through yesterday."""
+        from app.main import nav_catchup
+        from app.services.clock import today_ict
+
+        yesterday = today_ict() - __import__("datetime").timedelta(days=1)
+        last_have = yesterday - __import__("datetime").timedelta(days=5)
+        await self._seed_portfolio_fund(db, "FUND_X", proj_id="PROJX")
+        db.add(NavHistory(fund_code="FUND_X", trade_date=last_have, nav=Decimal("10")))
+        await db.commit()
+
+        # Track every date that the underlying sync_nav_for_date is asked about
+        called_dates: list[date] = []
+        async def fake_sync_for_date(db_, nav_date, proj_ids=None):
+            called_dates.append(nav_date)
+            return {"synced": 1, "skipped": 0, "errors": []}
+
+        with (
+            patch("app.services.sync_service.sync_nav_for_date", new=fake_sync_for_date),
+            patch("app.services.sync_service.settings") as mock_settings,
+        ):
+            mock_settings.SEC_API_KEY = "fake-key"
+            await nav_catchup(db)
+
+        # Range is last_have+1 .. yesterday, weekdays only
+        expected_start = last_have + __import__("datetime").timedelta(days=1)
+        assert called_dates, "sync_nav_for_date should have been called at least once"
+        # All called dates fall in [expected_start, yesterday] and are weekdays
+        for d in called_dates:
+            assert expected_start <= d <= yesterday
+            assert d.weekday() < 5
+
+    @pytest.mark.asyncio
+    async def test_no_op_when_already_up_to_date(self, db):
+        """If last_have == yesterday, start > yesterday → nothing to do."""
+        from app.main import nav_catchup
+        from app.services.clock import today_ict
+
+        yesterday = today_ict() - __import__("datetime").timedelta(days=1)
+        await self._seed_portfolio_fund(db, "FUND_X", proj_id="PROJX")
+        db.add(NavHistory(fund_code="FUND_X", trade_date=yesterday, nav=Decimal("10")))
+        await db.commit()
+
+        with patch(
+            "app.services.sync_service.sync_nav_for_date",
+            new=AsyncMock(side_effect=AssertionError("should not be called")),
+        ):
+            await nav_catchup(db)
+
+    @pytest.mark.asyncio
+    async def test_caps_window_at_30_days(self, db):
+        """Gap of 60 days → window capped at the most recent 30 days."""
+        from app.main import nav_catchup, NAV_CATCHUP_MAX_DAYS
+        from app.services.clock import today_ict
+
+        yesterday = today_ict() - __import__("datetime").timedelta(days=1)
+        last_have = yesterday - __import__("datetime").timedelta(days=60)
+        await self._seed_portfolio_fund(db, "FUND_X", proj_id="PROJX")
+        db.add(NavHistory(fund_code="FUND_X", trade_date=last_have, nav=Decimal("10")))
+        await db.commit()
+
+        called_dates: list[date] = []
+        async def fake_sync_for_date(db_, nav_date, proj_ids=None):
+            called_dates.append(nav_date)
+            return {"synced": 1, "skipped": 0, "errors": []}
+
+        with (
+            patch("app.services.sync_service.sync_nav_for_date", new=fake_sync_for_date),
+            patch("app.services.sync_service.settings") as mock_settings,
+        ):
+            mock_settings.SEC_API_KEY = "fake-key"
+            await nav_catchup(db)
+
+        # Earliest called date must be >= yesterday - (MAX_DAYS - 1)
+        min_allowed = yesterday - __import__("datetime").timedelta(days=NAV_CATCHUP_MAX_DAYS - 1)
+        assert called_dates, "should have called sync_nav_for_date at least once"
+        assert min(called_dates) >= min_allowed
+        assert min(called_dates) > last_have + __import__("datetime").timedelta(days=1)
