@@ -72,11 +72,14 @@ def fifo_consume(lots: list[LotSnapshot], units_needed: Decimal) -> list[Consump
         if remaining <= EPSILON:
             break
         consume = min(lot.units_remaining, remaining)
-        # Consuming entire lot: use exact cost_basis to prevent rounding drift
-        if lot.units_remaining - consume <= EPSILON:
+        if consume == lot.units_remaining:
+            # Exact full consumption: use exact cost_basis (no quantization drift).
             cost = lot.cost_basis_remaining
-            consume = lot.units_remaining
         else:
+            # Partial: quantize proportional cost. Any sub-EPSILON residual stays
+            # in the lot — analytics filters `units_remaining > 0` already and
+            # the next consumption will pick it up. Never bump `consume` past
+            # what the caller asked for: that would silently over-consume.
             fraction = consume / lot.units_remaining
             cost = _q(lot.cost_basis_remaining * fraction)
         result.append(Consumption(lot_id=lot.id, units_consumed=consume, cost_basis_consumed=cost))

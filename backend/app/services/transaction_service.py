@@ -27,13 +27,16 @@ async def _open_lots(
     fund_code: str,
     tax_scheme: str,
 ) -> list[LotSnapshot]:
+    # FOR UPDATE: lock rows for the duration of the enclosing transaction so two
+    # concurrent SELL/SWITCH calls against the same lots can't both succeed and
+    # over-consume. No-op on SQLite (tests); enforced on PostgreSQL (prod).
     result = await db.execute(
         select(TaxLot).where(
             TaxLot.portfolio_id == portfolio_id,
             TaxLot.fund_code == fund_code,
             TaxLot.tax_scheme == tax_scheme,
             TaxLot.units_remaining > Decimal("0"),
-        )
+        ).with_for_update()
     )
     lots = result.scalars().all()
     return [
@@ -100,6 +103,12 @@ async def rebuild_lots(portfolio_id: UUID, db: AsyncSession) -> None:
     )
     txs = result.scalars().all()
 
+    # Pre-index pairs by pair_id for O(N) lookup instead of O(N) scans per pair
+    pairs_by_id: dict[str, list[Transaction]] = {}
+    for tx in txs:
+        if tx.pair_id:
+            pairs_by_id.setdefault(tx.pair_id, []).append(tx)
+
     processed_pairs: set[str] = set()
     for tx in txs:
         if tx.type == "BUY":
@@ -110,11 +119,15 @@ async def rebuild_lots(portfolio_id: UUID, db: AsyncSession) -> None:
             if tx.pair_id in processed_pairs:
                 continue
             processed_pairs.add(tx.pair_id)
-            pair = [t for t in txs if t.pair_id == tx.pair_id]
+            pair = pairs_by_id.get(tx.pair_id, [])
             out_tx = next((t for t in pair if t.type == "SWITCH_OUT"), None)
             in_tx = next((t for t in pair if t.type == "SWITCH_IN"), None)
-            if out_tx and in_tx:
-                await apply_switch(db, out_tx, in_tx)
+            if not (out_tx and in_tx):
+                raise ValueError(
+                    f"SWITCH pair_id={tx.pair_id} is incomplete during rebuild "
+                    f"(found {[t.type for t in pair]}); refusing to silently lose units"
+                )
+            await apply_switch(db, out_tx, in_tx)
         # DIVIDEND and INTEREST: no lot mutation
 
 

@@ -140,13 +140,13 @@ async def get_holdings(portfolio_id: UUID, db: AsyncSession) -> list[HoldingRow]
     fund_result = await db.execute(select(Fund).where(Fund.fund_code.in_(fund_codes)))
     fund_map: dict[str, Fund] = {f.fund_code: f for f in fund_result.scalars().all()}
 
-    # Entry cost per (fund_code, tax_scheme): sum of BUY/SWITCH_IN amounts and units
+    # First entry date into this (fund_code, tax_scheme) — used for display.
+    # We DON'T use lifetime entry totals for cost calculations any more (they
+    # were wrong after partial sells): cost basis comes from open lots directly.
     entry_result = await db.execute(
         select(
             Transaction.fund_code,
             Transaction.tax_scheme,
-            func.sum(Transaction.amount).label("entry_amount"),
-            func.sum(Transaction.units).label("entry_units"),
             func.min(Transaction.date).label("entry_date"),
         )
         .where(
@@ -155,10 +155,10 @@ async def get_holdings(portfolio_id: UUID, db: AsyncSession) -> list[HoldingRow]
         )
         .group_by(Transaction.fund_code, Transaction.tax_scheme)
     )
-    entry_map: dict[tuple[str, str], tuple[Decimal, Decimal, date | None]] = {
-        (r.fund_code, r.tax_scheme): (Decimal(str(r.entry_amount)), Decimal(str(r.entry_units)), r.entry_date)
+    entry_date_map: dict[tuple[str, str], date | None] = {
+        (r.fund_code, r.tax_scheme): r.entry_date
         for r in entry_result.all()
-        if r.fund_code and r.entry_units and Decimal(str(r.entry_units)) > 0
+        if r.fund_code
     }
 
     # Dividends received per (fund_code, tax_scheme)
@@ -198,18 +198,13 @@ async def get_holdings(portfolio_id: UUID, db: AsyncSession) -> list[HoldingRow]
         oldest_date = row.oldest_date
         holding_days = (today - oldest_date).days if oldest_date else None
 
-        # Fund-entry P&L: compares current value to weighted avg entry NAV in this fund
-        entry_info = entry_map.get((row.fund_code, row.tax_scheme))
-        entry_cost_in_fund: Decimal | None = None
-        fund_pnl_pct: Decimal | None = None
-        fund_entry_date: date | None = None
-        if entry_info:
-            e_amount, e_units, fund_entry_date = entry_info
-            if e_units > 0 and market_value is not None:
-                avg_entry_nav = e_amount / e_units
-                entry_cost_in_fund = (units * avg_entry_nav).quantize(QUANT)
-                fund_pnl = market_value - entry_cost_in_fund
-                fund_pnl_pct = _safe_pnl_pct(fund_pnl, entry_cost_in_fund)
+        # Fund-entry P&L: derived from open lots only — equivalent to cost-basis P&L
+        # once partial sells are accounted for correctly. The "fund entry NAV"
+        # encoded in the lot's cost_basis_remaining / units_remaining IS the
+        # weighted average entry NAV in the current fund (preserved across switches).
+        entry_cost_in_fund: Decimal | None = cost if units > 0 else None
+        fund_pnl_pct: Decimal | None = upnl_pct
+        fund_entry_date: date | None = entry_date_map.get((row.fund_code, row.tax_scheme))
 
         # Dividends received for this (fund_code, tax_scheme)
         div_info = div_map.get((row.fund_code, row.tax_scheme))
@@ -217,8 +212,8 @@ async def get_holdings(portfolio_id: UUID, db: AsyncSession) -> list[HoldingRow]
         dividends_net = (div_info[0] - div_info[1]) if div_info else Decimal("0")
         total_return_pct = _safe_pnl_pct(upnl + dividends_net, cost) if upnl is not None else None
         total_return_fund_pct = (
-            _safe_pnl_pct(market_value - entry_cost_in_fund + dividends_net, entry_cost_in_fund)
-            if entry_cost_in_fund is not None and market_value is not None
+            _safe_pnl_pct(upnl + dividends_net, entry_cost_in_fund)
+            if entry_cost_in_fund is not None and upnl is not None
             else None
         )
 
@@ -255,7 +250,7 @@ async def get_holdings(portfolio_id: UUID, db: AsyncSession) -> list[HoldingRow]
 async def _realized_pnl(portfolio_id: UUID, db: AsyncSession) -> Decimal:
     """Sum realized gains from SELL transactions only."""
     result = await db.execute(
-        select(Transaction.id, Transaction.amount, Transaction.fee)
+        select(Transaction.id, Transaction.amount, Transaction.fee, Transaction.tax_withheld)
         .where(
             Transaction.portfolio_id == portfolio_id,
             Transaction.type == "SELL",
@@ -267,7 +262,10 @@ async def _realized_pnl(portfolio_id: UUID, db: AsyncSession) -> Decimal:
 
     total = Decimal("0")
     for tx in txs:
-        proceeds = Decimal(str(tx.amount)) - Decimal(str(tx.fee))
+        # Net proceeds = sale amount minus broker fee minus any withholding tax.
+        # Without subtracting WHT we'd overstate realized P&L for users subject
+        # to early-redemption WHT on RMF/SSF or non-resident WHT.
+        proceeds = Decimal(str(tx.amount)) - Decimal(str(tx.fee)) - Decimal(str(tx.tax_withheld))
         lc_result = await db.execute(
             select(func.sum(LotConsumption.cost_basis_consumed))
             .where(LotConsumption.transaction_id == tx.id)
@@ -337,47 +335,57 @@ async def compute_twr(
     db: AsyncSession,
 ) -> tuple[Decimal | None, str | None]:
     """
-    Time-Weighted Return for open positions, annualized.
-    Chains sub-period HPRs between each transaction date, eliminating
-    the timing effect of cash flows.
-    Returns (annualized_twr, error_code).
+    Time-Weighted Return — annualized when total_days >= 365, else period return.
+
+    Standard methodology: replay every BUY/SELL/SWITCH transaction in order while
+    maintaining per-fund unit positions. Between successive transaction dates,
+    compute the holding-period return as V_end / V_start using NAVs on those
+    boundary dates, where:
+      V_start = portfolio market value AFTER applying flows on the start boundary
+      V_end   = portfolio market value BEFORE applying flows on the end boundary
+    Chain-link the HPRs to eliminate the timing effect of cash flows.
+
+    This differs critically from the previous (broken) implementation, which used
+    current open-lot units across all historical sub-periods and valued switched
+    lots against the wrong fund's NAV history.
+
+    Returns (twr, error_code). error_code is None on success.
     """
-    result = await db.execute(
-        select(TaxLot.fund_code, TaxLot.units_remaining, TaxLot.original_purchase_date)
-        .where(TaxLot.portfolio_id == portfolio_id, TaxLot.units_remaining > 0)
-    )
-    lots = result.all()
-    if not lots:
-        return None, "no_positions"
-
-    fund_codes = list({lot.fund_code for lot in lots})
-
     tx_result = await db.execute(
-        select(Transaction.date)
+        select(
+            Transaction.date,
+            Transaction.type,
+            Transaction.fund_code,
+            Transaction.units,
+            Transaction.amount,
+            Transaction.fee,
+            Transaction.tax_scheme,
+            Transaction.pair_id,
+            Transaction.target_fund_code,
+        )
         .where(Transaction.portfolio_id == portfolio_id)
-        .distinct()
-        .order_by(Transaction.date)
+        .order_by(Transaction.date, Transaction.type)
     )
-    tx_dates = sorted({row.date for row in tx_result.all()})
-    if not tx_dates:
+    txs = tx_result.all()
+    if not txs:
         return None, "no_cashflows"
 
+    boundary_dates = sorted({t.date for t in txs})
     today = date.today()
-    boundaries = tx_dates + ([today] if tx_dates[-1] != today else [])
-    if len(boundaries) < 2:
-        return None, "no_cashflows"
-
-    start_date = boundaries[0]
-    total_days = (boundaries[-1] - start_date).days
-    if total_days <= 0:
+    if boundary_dates[-1] < today:
+        boundary_dates.append(today)
+    if len(boundary_dates) < 2:
         return None, "no_history"
+
+    fund_codes = list({t.fund_code for t in txs if t.fund_code})
+    if not fund_codes:
+        return None, "no_positions"
 
     nav_result = await db.execute(
         select(NavHistory.fund_code, NavHistory.trade_date, NavHistory.nav)
-        .where(NavHistory.fund_code.in_(fund_codes), NavHistory.trade_date >= start_date)
+        .where(NavHistory.fund_code.in_(fund_codes), NavHistory.trade_date >= boundary_dates[0])
         .order_by(NavHistory.fund_code, NavHistory.trade_date)
     )
-    # nav_lookup[fund_code] = sorted list of (trade_date, nav)
     nav_lookup: dict[str, list[tuple[date, Decimal]]] = {}
     for row in nav_result.all():
         nav_lookup.setdefault(row.fund_code, []).append((row.trade_date, row.nav))
@@ -397,30 +405,77 @@ async def compute_twr(
                 hi = mid - 1
         return entries[idx][1] if idx >= 0 else None
 
+    # Position state: (fund_code, tax_scheme) -> units. Cost basis is not needed
+    # for TWR (which uses market value only) but we track it to share the
+    # proportional reduction logic with apply_sell.
+    positions: dict[tuple[str, str], Decimal] = {}
+
+    def portfolio_value_on(d: date) -> Decimal:
+        v = Decimal("0")
+        for (fund_code, _scheme), units in positions.items():
+            if units <= 0:
+                continue
+            nav = nav_on_or_before(fund_code, d)
+            if nav is None:
+                continue
+            v += units * nav
+        return v
+
+    def apply_flows_on(d: date) -> None:
+        """Apply every BUY/SELL/SWITCH transaction dated d. Switches are matched
+        by pair_id; both legs in one logical step. DIVIDEND/INTEREST do not
+        change units."""
+        seen_pairs: set[str] = set()
+        for t in txs:
+            if t.date != d:
+                continue
+            if t.type == "BUY" and t.fund_code:
+                key = (t.fund_code, t.tax_scheme)
+                positions[key] = positions.get(key, Decimal("0")) + Decimal(str(t.units or 0))
+            elif t.type == "SELL" and t.fund_code:
+                key = (t.fund_code, t.tax_scheme)
+                positions[key] = positions.get(key, Decimal("0")) - Decimal(str(t.units or 0))
+            elif t.type in ("SWITCH_OUT", "SWITCH_IN") and t.pair_id:
+                if t.pair_id in seen_pairs:
+                    continue
+                seen_pairs.add(t.pair_id)
+                pair = [p for p in txs if p.pair_id == t.pair_id and p.date == d]
+                out_tx = next((p for p in pair if p.type == "SWITCH_OUT"), None)
+                in_tx = next((p for p in pair if p.type == "SWITCH_IN"), None)
+                if out_tx and out_tx.fund_code:
+                    key = (out_tx.fund_code, out_tx.tax_scheme)
+                    positions[key] = positions.get(key, Decimal("0")) - Decimal(str(out_tx.units or 0))
+                if in_tx and in_tx.fund_code:
+                    key = (in_tx.fund_code, in_tx.tax_scheme)
+                    positions[key] = positions.get(key, Decimal("0")) + Decimal(str(in_tx.units or 0))
+
+    # Apply flows on the first boundary, then snapshot V.
+    apply_flows_on(boundary_dates[0])
+    v_after = portfolio_value_on(boundary_dates[0])
+
     twr_factor = Decimal("1")
-    had_valid_period = False
+    valid_periods = 0
 
-    for i in range(len(boundaries) - 1):
-        d_start, d_end = boundaries[i], boundaries[i + 1]
-        v_start = Decimal("0")
-        v_end = Decimal("0")
-        for lot in lots:
-            if lot.original_purchase_date > d_start:
-                continue
-            units = Decimal(str(lot.units_remaining))
-            ns = nav_on_or_before(lot.fund_code, d_start)
-            ne = nav_on_or_before(lot.fund_code, d_end)
-            if ns is None or ne is None:
-                continue
-            v_start += units * ns
-            v_end += units * ne
-        if v_start <= 0:
-            continue
-        twr_factor *= v_end / v_start
-        had_valid_period = True
+    for i in range(1, len(boundary_dates)):
+        d = boundary_dates[i]
+        v_before = portfolio_value_on(d)
+        if v_after > 0 and v_before > 0:
+            twr_factor *= v_before / v_after
+            valid_periods += 1
+        apply_flows_on(d)
+        v_after = portfolio_value_on(d)
 
-    if not had_valid_period or twr_factor <= 0:
+    if valid_periods == 0 or twr_factor <= 0:
         return None, "no_nav"
+
+    total_days = (boundary_dates[-1] - boundary_dates[0]).days
+    if total_days <= 0:
+        return (twr_factor - Decimal("1")).quantize(QUANT), None
+
+    # Annualize only when the period is at least one year; otherwise return the
+    # cumulative period return (annualizing a 30-day return is misleading).
+    if total_days < 365:
+        return (twr_factor - Decimal("1")).quantize(QUANT), None
 
     try:
         annualized = Decimal(str((float(twr_factor) ** (365.25 / total_days)) - 1))
@@ -477,7 +532,8 @@ async def compute_xirr(
         if tx.type == "BUY":
             cash_flows.append((tx.date, -(amount + fee)))
         elif tx.type == "SELL":
-            cash_flows.append((tx.date, amount - fee))
+            # Subtract WHT to keep parity with the DIVIDEND/INTEREST branch below.
+            cash_flows.append((tx.date, amount - fee - withheld))
         elif tx.type in ("DIVIDEND", "INTEREST"):
             # Use net received amount (gross minus withholding tax)
             cash_flows.append((tx.date, amount - withheld))

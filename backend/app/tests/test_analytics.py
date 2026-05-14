@@ -185,6 +185,51 @@ class TestHoldings:
         assert schemes == {"NORMAL", "SSF"}
 
     @pytest.mark.asyncio
+    async def test_fund_pnl_pct_matches_open_lot_basis_after_full_exit_and_reentry(self, db):
+        """H5 regression: a fund that was fully exited then re-entered must use the
+        new lot's cost basis, not a lifetime-weighted average from old BUYs."""
+        _, portfolio, _ = await _seed_basic(db)
+        # The user's history: bought 1000 at NAV 10 (cost 10000), sold all 1000,
+        # bought 500 at NAV 20 (cost 10000). Current open lot has cost 10000.
+        db.add(Transaction(
+            id=uuid.uuid4(), portfolio_id=portfolio.id,
+            date=date(2024, 1, 1), type="BUY", fund_code="TESTFUND",
+            units=Decimal("1000"), nav=Decimal("10"), amount=Decimal("10000"),
+            fee=Decimal("0"), tax_withheld=Decimal("0"), tax_scheme="NORMAL",
+        ))
+        db.add(Transaction(
+            id=uuid.uuid4(), portfolio_id=portfolio.id,
+            date=date(2024, 6, 1), type="SELL", fund_code="TESTFUND",
+            units=Decimal("1000"), nav=Decimal("12"), amount=Decimal("12000"),
+            fee=Decimal("0"), tax_withheld=Decimal("0"), tax_scheme="NORMAL",
+        ))
+        db.add(Transaction(
+            id=uuid.uuid4(), portfolio_id=portfolio.id,
+            date=date(2025, 1, 1), type="BUY", fund_code="TESTFUND",
+            units=Decimal("500"), nav=Decimal("20"), amount=Decimal("10000"),
+            fee=Decimal("0"), tax_withheld=Decimal("0"), tax_scheme="NORMAL",
+        ))
+        # Only the second BUY's lot is open
+        db.add(TaxLot(
+            id=uuid.uuid4(), portfolio_id=portfolio.id, fund_code="TESTFUND",
+            original_purchase_date=date(2025, 1, 1),
+            units_remaining=Decimal("500"), cost_basis_remaining=Decimal("10000"),
+            tax_scheme="NORMAL",
+        ))
+        db.add(NavHistory(fund_code="TESTFUND", trade_date=date(2026, 1, 15), nav=Decimal("22")))
+        await db.flush()
+
+        holdings = await ps.get_holdings(portfolio.id, db)
+        h = holdings[0]
+        # market_value = 500 * 22 = 11000; cost = 10000; gain = 1000 → 10%
+        assert h.market_value == Decimal("11000.00000000")
+        assert h.unrealized_pnl == Decimal("1000.00000000")
+        # Fund-entry P&L must equal cost-basis P&L (10% gain), NOT the buggy
+        # 11000 - 500*(20000/1500) = 11000 - 6667 = 4333 → 65% with the old code.
+        assert h.fund_pnl_pct == h.unrealized_pnl_pct
+        assert h.entry_cost_in_fund == h.cost_basis
+
+    @pytest.mark.asyncio
     async def test_latest_nav_picked_correctly(self, db):
         """Multiple NAV rows — latest date wins."""
         _, portfolio, _ = await _seed_basic(db)
@@ -254,6 +299,34 @@ class TestRealizedPnl:
 
         pnl = await ps._realized_pnl(portfolio.id, db)
         assert pnl == Decimal("0")
+
+    @pytest.mark.asyncio
+    async def test_sell_with_tax_withheld_subtracts_wht(self, db):
+        """WHT must reduce realized P&L — without this fix it inflates gains."""
+        _, portfolio, _ = await _seed_basic(db)
+        lot = TaxLot(
+            id=uuid.uuid4(), portfolio_id=portfolio.id, fund_code="TESTFUND",
+            original_purchase_date=date(2024, 1, 1),
+            units_remaining=Decimal("0"), cost_basis_remaining=Decimal("0"),
+            tax_scheme="RMF",
+        )
+        db.add(lot)
+        tx = Transaction(
+            id=uuid.uuid4(), portfolio_id=portfolio.id,
+            date=date(2025, 6, 1), type="SELL",
+            amount=Decimal("13000"), fee=Decimal("50"), tax_withheld=Decimal("200"),
+            tax_scheme="RMF",
+        )
+        db.add(tx)
+        db.add(LotConsumption(
+            id=uuid.uuid4(), transaction_id=tx.id, lot_id=lot.id,
+            units_consumed=Decimal("1000"), cost_basis_consumed=Decimal("10000"),
+        ))
+        await db.flush()
+
+        pnl = await ps._realized_pnl(portfolio.id, db)
+        # proceeds = 13000 - 50 - 200 = 12750; cost = 10000; gain = 2750
+        assert pnl == Decimal("2750.00000000")
 
 
 # ── tax eligibility tests ──────────────────────────────────────────────────────
@@ -383,3 +456,128 @@ class TestTaxEligibility:
         import math
         expected = purchase + __import__("datetime").timedelta(days=math.ceil(10 * 365.25))
         assert lots[0].eligible_date == expected
+
+
+# ── TWR tests ─────────────────────────────────────────────────────────────────
+
+class TestTwr:
+
+    @pytest.mark.asyncio
+    async def test_no_transactions_returns_no_cashflows(self, db):
+        _, portfolio, _ = await _seed_basic(db)
+        twr, err = await ps.compute_twr(portfolio.id, db)
+        assert twr is None
+        assert err == "no_cashflows"
+
+    @pytest.mark.asyncio
+    async def test_short_period_returns_unannualized_period_return(self, db):
+        """BUY, then NAV doubles 30 days later. Period < 1 year → no annualization."""
+        _, portfolio, _ = await _seed_basic(db)
+        today = date.today()
+        buy_date = today - timedelta(days=30)
+        db.add(Transaction(
+            id=uuid.uuid4(), portfolio_id=portfolio.id,
+            date=buy_date, type="BUY", fund_code="TESTFUND",
+            units=Decimal("1000"), nav=Decimal("10"), amount=Decimal("10000"),
+            fee=Decimal("0"), tax_withheld=Decimal("0"), tax_scheme="NORMAL",
+        ))
+        db.add(NavHistory(fund_code="TESTFUND", trade_date=buy_date, nav=Decimal("10")))
+        db.add(NavHistory(fund_code="TESTFUND", trade_date=today, nav=Decimal("20")))
+        await db.flush()
+
+        twr, err = await ps.compute_twr(portfolio.id, db)
+        assert err is None
+        # 30-day period, NAV doubled → 100% period return (NOT annualized).
+        assert twr is not None
+        assert abs(twr - Decimal("1.0")) < Decimal("0.001")
+
+    @pytest.mark.asyncio
+    async def test_one_year_period_annualizes(self, db):
+        """BUY exactly 365 days before today; NAV doubles → ~100% annualized."""
+        _, portfolio, _ = await _seed_basic(db)
+        today = date.today()
+        buy_date = today - timedelta(days=365)
+        db.add(Transaction(
+            id=uuid.uuid4(), portfolio_id=portfolio.id,
+            date=buy_date, type="BUY", fund_code="TESTFUND",
+            units=Decimal("1000"), nav=Decimal("10"), amount=Decimal("10000"),
+            fee=Decimal("0"), tax_withheld=Decimal("0"), tax_scheme="NORMAL",
+        ))
+        db.add(NavHistory(fund_code="TESTFUND", trade_date=buy_date, nav=Decimal("10")))
+        db.add(NavHistory(fund_code="TESTFUND", trade_date=today, nav=Decimal("20")))
+        await db.flush()
+
+        twr, err = await ps.compute_twr(portfolio.id, db)
+        assert err is None
+        assert twr is not None
+        # 2.0 ** (365.25/365) - 1 ≈ 1.0024 — well within 5% of 100%
+        assert abs(twr - Decimal("1.0")) < Decimal("0.05")
+
+    @pytest.mark.asyncio
+    async def test_full_exit_and_reentry_chains_active_periods_only(self, db):
+        """The user has two active investment periods separated by a flat (held-nothing)
+        gap. TWR must compound only the active sub-periods, not value an empty
+        portfolio against historical NAVs (which the old impl did)."""
+        _, portfolio, _ = await _seed_basic(db)
+        today = date.today()
+        # Period A: buy 60 days ago, sell 30 days ago. NAV 10 → 20 → 2x.
+        # Gap of 15 days with no positions.
+        # Period B: buy 15 days ago at NAV 20, today NAV 40 → 2x again.
+        d_buy1 = today - timedelta(days=60)
+        d_sell = today - timedelta(days=30)
+        d_buy2 = today - timedelta(days=15)
+        db.add_all([
+            Transaction(
+                id=uuid.uuid4(), portfolio_id=portfolio.id,
+                date=d_buy1, type="BUY", fund_code="TESTFUND",
+                units=Decimal("1000"), nav=Decimal("10"), amount=Decimal("10000"),
+                fee=Decimal("0"), tax_withheld=Decimal("0"), tax_scheme="NORMAL",
+            ),
+            Transaction(
+                id=uuid.uuid4(), portfolio_id=portfolio.id,
+                date=d_sell, type="SELL", fund_code="TESTFUND",
+                units=Decimal("1000"), nav=Decimal("20"), amount=Decimal("20000"),
+                fee=Decimal("0"), tax_withheld=Decimal("0"), tax_scheme="NORMAL",
+            ),
+            Transaction(
+                id=uuid.uuid4(), portfolio_id=portfolio.id,
+                date=d_buy2, type="BUY", fund_code="TESTFUND",
+                units=Decimal("500"), nav=Decimal("20"), amount=Decimal("10000"),
+                fee=Decimal("0"), tax_withheld=Decimal("0"), tax_scheme="NORMAL",
+            ),
+        ])
+        for d, nav in [(d_buy1, "10"), (d_sell, "20"), (d_buy2, "20"), (today, "40")]:
+            db.add(NavHistory(fund_code="TESTFUND", trade_date=d, nav=Decimal(nav)))
+        await db.flush()
+
+        twr, err = await ps.compute_twr(portfolio.id, db)
+        assert err is None
+        # Active sub-periods: 2x then 2x → cumulative 4x = 300% period return.
+        # Period < 1 year, no annualization → twr == 3.0
+        assert twr is not None
+        assert abs(twr - Decimal("3.0")) < Decimal("0.01")
+
+
+# ── rebuild_lots half-pair test ────────────────────────────────────────────────
+
+class TestRebuildLotsHalfPair:
+
+    @pytest.mark.asyncio
+    async def test_rebuild_raises_on_orphan_switch_leg(self, db):
+        """H2 regression: an orphaned SWITCH_IN (or _OUT) must NOT silently
+        disappear during rebuild — it must raise so corrupt data is visible."""
+        from app.services.transaction_service import rebuild_lots
+
+        _, portfolio, _ = await _seed_basic(db)
+        # Insert a SWITCH_IN with a pair_id but no matching SWITCH_OUT
+        db.add(Transaction(
+            id=uuid.uuid4(), portfolio_id=portfolio.id,
+            date=date(2025, 1, 1), type="SWITCH_IN", fund_code="TESTFUND",
+            units=Decimal("500"), nav=Decimal("20"), amount=Decimal("10000"),
+            fee=Decimal("0"), tax_withheld=Decimal("0"),
+            pair_id="orphan-pair", tax_scheme="NORMAL",
+        ))
+        await db.flush()
+
+        with pytest.raises(ValueError, match="incomplete"):
+            await rebuild_lots(portfolio.id, db)
