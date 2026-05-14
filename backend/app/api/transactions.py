@@ -30,11 +30,23 @@ router = APIRouter(prefix="/portfolios/{portfolio_id}/transactions", tags=["tran
 lots_router = APIRouter(prefix="/portfolios/{portfolio_id}/lots", tags=["lots"])
 
 
-async def _get_portfolio(portfolio_id: uuid.UUID, db: AsyncSession, user: User) -> Portfolio:
+async def _get_portfolio_read(portfolio_id: uuid.UUID, db: AsyncSession, user: User) -> Portfolio:
+    """Read access: owner or admin (admin = support read-only)."""
     p = await db.get(Portfolio, portfolio_id)
     if not p:
         raise HTTPException(status_code=404, detail="Portfolio not found")
     if p.user_id != user.id and user.role != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return p
+
+
+async def _get_portfolio_write(portfolio_id: uuid.UUID, db: AsyncSession, user: User) -> Portfolio:
+    """Write access: owner only. Admin role does NOT grant write on another
+    user's portfolio — admins manage user accounts, not user data."""
+    p = await db.get(Portfolio, portfolio_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+    if p.user_id != user.id:
         raise HTTPException(status_code=403, detail="Forbidden")
     return p
 
@@ -45,7 +57,7 @@ async def list_transactions(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    await _get_portfolio(portfolio_id, db, user)
+    await _get_portfolio_read(portfolio_id, db, user)
     result = await db.execute(
         select(Transaction)
         .where(Transaction.portfolio_id == portfolio_id)
@@ -61,7 +73,7 @@ async def add_transaction(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    await _get_portfolio(portfolio_id, db, user)
+    await _get_portfolio_write(portfolio_id, db, user)
 
     tx = Transaction(
         id=uuid.uuid4(),
@@ -107,7 +119,7 @@ async def add_switch(
     user: User = Depends(get_current_user),
 ):
     """Record a fund switch as a paired SWITCH_OUT + SWITCH_IN in one atomic operation."""
-    await _get_portfolio(portfolio_id, db, user)
+    await _get_portfolio_write(portfolio_id, db, user)
 
     if switch_out.type != "SWITCH_OUT" or switch_in.type != "SWITCH_IN":
         raise HTTPException(status_code=400, detail="Must supply one SWITCH_OUT and one SWITCH_IN")
@@ -158,7 +170,7 @@ async def import_csv(
     user: User = Depends(get_current_user),
 ):
     """Parse a CSV file, validate all rows, then import valid ones."""
-    await _get_portfolio(portfolio_id, db, user)
+    await _get_portfolio_write(portfolio_id, db, user)
 
     content = await file.read()
     text = io.StringIO(content.decode("utf-8-sig"))  # handle BOM
@@ -268,7 +280,7 @@ async def delete_transaction(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    await _get_portfolio(portfolio_id, db, user)
+    await _get_portfolio_write(portfolio_id, db, user)
     tx = await db.get(Transaction, transaction_id)
     if not tx or tx.portfolio_id != portfolio_id:
         raise HTTPException(status_code=404, detail="Transaction not found")
@@ -304,7 +316,7 @@ async def list_lots(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    await _get_portfolio(portfolio_id, db, user)
+    await _get_portfolio_read(portfolio_id, db, user)
     result = await db.execute(
         select(TaxLot)
         .where(TaxLot.portfolio_id == portfolio_id, TaxLot.units_remaining > 0)

@@ -438,10 +438,11 @@ class TestTaxEligibility:
         assert lots[0].is_eligible is True
 
     @pytest.mark.asyncio
-    async def test_eligible_date_computed(self, db, setup):
-        """Eligible date = purchase + required_days (ceil)."""
+    async def test_eligible_date_is_anniversary_not_day_count(self, db, setup):
+        """M4 regression: eligibility uses anniversary semantics ("day-for-day"),
+        not ceil(N × 365.25). Buy 2023-05-30 SSF → eligible 2033-05-30, exactly."""
         _, portfolio, _ = setup
-        purchase = date(2020, 3, 15)
+        purchase = date(2023, 5, 30)
         db.add(TaxLot(
             id=uuid.uuid4(), portfolio_id=portfolio.id, fund_code="TESTFUND",
             original_purchase_date=purchase,
@@ -451,11 +452,27 @@ class TestTaxEligibility:
         await db.flush()
 
         lots = await ps.get_tax_eligibility(portfolio.id, db, date(2025, 1, 1), None)
-        assert lots[0].eligible_date is not None
-        # 10 × 365.25 = 3652.5 → ceil = 3653 days from purchase
-        import math
-        expected = purchase + __import__("datetime").timedelta(days=math.ceil(10 * 365.25))
-        assert lots[0].eligible_date == expected
+        assert lots[0].eligible_date == date(2033, 5, 30)
+
+    @pytest.mark.asyncio
+    async def test_missing_rule_marks_lot_not_eligible(self, db):
+        """M3 regression: a lot whose tax_scheme has no row in tax_scheme_rules
+        must be marked NOT eligible (fail-safe). The previous code defaulted to
+        True, which would silently let an unknown-scheme lot appear tax-free."""
+        _, portfolio, _ = await _seed_basic(db)
+        # Deliberately seed NO scheme rules. The lot's scheme isn't in tax_scheme_rules.
+        db.add(TaxLot(
+            id=uuid.uuid4(), portfolio_id=portfolio.id, fund_code="TESTFUND",
+            original_purchase_date=date(2020, 1, 1),
+            units_remaining=Decimal("100"), cost_basis_remaining=Decimal("1000"),
+            tax_scheme="UNKNOWN_SCHEME",
+        ))
+        await db.flush()
+
+        lots = await ps.get_tax_eligibility(portfolio.id, db, date(2025, 1, 1), None)
+        assert len(lots) == 1
+        assert lots[0].is_eligible is False
+        assert lots[0].eligible_date is None
 
 
 # ── TWR tests ─────────────────────────────────────────────────────────────────

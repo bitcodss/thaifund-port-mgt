@@ -695,7 +695,14 @@ async def get_tax_eligibility(
     for lot in lots:
         rule = get_rule(lot.tax_scheme, lot.original_purchase_date)
         if rule is None:
-            # NORMAL scheme or unknown — always eligible
+            # Missing rule for this scheme — fail safe (NOT eligible) rather than
+            # silently allow withdrawal. The NORMAL scheme has its own row
+            # (holding_years=0) in seeded data, so this branch only fires for
+            # truly unknown schemes or a missing seed.
+            logger.warning(
+                "tax_scheme_rules row missing for scheme=%s — marking lot %s NOT eligible",
+                lot.tax_scheme, lot.id,
+            )
             results.append(LotEligibility(
                 lot_id=lot.id,
                 source_lot_id=lot.source_lot_id,
@@ -708,7 +715,7 @@ async def get_tax_eligibility(
                 cost_basis_remaining=lot.cost_basis_remaining,
                 market_value=None,
                 unrealized_pnl=None,
-                is_eligible=True,
+                is_eligible=False,
                 eligible_date=None,
                 days_remaining=0,
                 holding_years_required=Decimal("0"),
@@ -716,9 +723,16 @@ async def get_tax_eligibility(
             ))
             continue
 
-        # Time gate: purchase_date + holding_years
-        required_days_f = float(rule.holding_years) * 365.25
-        time_eligible_date = lot.original_purchase_date + timedelta(days=math.ceil(required_days_f))
+        # Time gate: anniversary-based ("day-for-day"). Buy 2023-05-30 →
+        # eligible 2033-05-30. Whole-year rules only (all current schemes).
+        years_int = int(rule.holding_years)
+        try:
+            time_eligible_date = lot.original_purchase_date.replace(
+                year=lot.original_purchase_date.year + years_int
+            )
+        except ValueError:
+            # Feb 29 purchase landing in a non-leap target year — round to Mar 1.
+            time_eligible_date = date(lot.original_purchase_date.year + years_int, 3, 1)
         eligible_date = time_eligible_date
 
         # Age gate: if rule requires age ≥ N and DOB is known

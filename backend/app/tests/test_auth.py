@@ -230,6 +230,67 @@ class TestDobChangeInvalidatesCache:
         assert ps._cache_get(f"{portfolio.id}:summary:2026-05-14") == "keep-me"
 
 
+# ── M2: admin scope on user portfolios (read-only) ────────────────────────────
+
+class TestAdminPortfolioScope:
+    """Admin should be able to GET another user's portfolio (support read-only)
+    but NOT mutate it. Owner of course still has full access."""
+
+    @pytest.mark.asyncio
+    async def test_admin_can_read_other_users_portfolio(self, db):
+        """Admin GET /portfolios/{id} succeeds for any portfolio."""
+        import uuid as _uuid
+        from app.models.portfolio import Portfolio
+        from app.api.portfolios import _require_read_access, _require_write_access
+
+        owner = User(id=_uuid.uuid4(), email="o@x", password_hash="x", role="user")
+        admin = User(id=_uuid.uuid4(), email="a@x", password_hash="x", role="admin")
+        p = Portfolio(id=_uuid.uuid4(), user_id=owner.id, name="theirs")
+        db.add_all([owner, admin, p])
+        await db.commit()
+
+        # Read access allowed
+        _require_read_access(p, admin)  # does not raise
+        # Write access denied — admin is NOT owner
+        import pytest as _pytest
+        with _pytest.raises(Exception) as exc_info:
+            _require_write_access(p, admin)
+        assert "403" in str(exc_info.value) or "Forbidden" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_owner_has_full_access(self, db):
+        """Owner of course passes both read and write checks."""
+        import uuid as _uuid
+        from app.models.portfolio import Portfolio
+        from app.api.portfolios import _require_read_access, _require_write_access
+
+        owner = User(id=_uuid.uuid4(), email="self@x", password_hash="x", role="user")
+        p = Portfolio(id=_uuid.uuid4(), user_id=owner.id, name="mine")
+        db.add_all([owner, p])
+        await db.commit()
+
+        _require_read_access(p, owner)
+        _require_write_access(p, owner)  # both pass for owner
+
+    @pytest.mark.asyncio
+    async def test_non_owner_non_admin_blocked_from_read(self, db):
+        """Random user cannot even read someone else's portfolio."""
+        import uuid as _uuid
+        from app.models.portfolio import Portfolio
+        from app.api.portfolios import _require_read_access
+
+        owner = User(id=_uuid.uuid4(), email="o2@x", password_hash="x", role="user")
+        stranger = User(id=_uuid.uuid4(), email="s@x", password_hash="x", role="user")
+        p = Portfolio(id=_uuid.uuid4(), user_id=owner.id, name="not yours")
+        db.add_all([owner, stranger, p])
+        await db.commit()
+
+        import pytest as _pytest
+        with _pytest.raises(Exception) as exc_info:
+            _require_read_access(p, stranger)
+        assert "403" in str(exc_info.value) or "Forbidden" in str(exc_info.value)
+
+
 # ── M11: CORS origins parsing ─────────────────────────────────────────────────
 
 class TestCorsOriginParsing:

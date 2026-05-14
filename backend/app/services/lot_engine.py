@@ -139,15 +139,22 @@ def is_holding_eligible(
 ) -> bool:
     """
     Return True if the lot has met its holding period requirement.
-    Uses 365.25 days/year for fractional year calculation.
+
+    Anniversary semantics ("day-for-day"): buy 2023-05-30, eligible on or after
+    2033-05-30. NOT a day-count approximation. All current Thai schemes use
+    whole-year holding periods; fractional years would need explicit handling.
     """
     if rule.holding_years == Decimal("0"):
         return True
 
-    days_held = (today - purchase_date).days
-    years_held = Decimal(str(days_held)) / Decimal("365.25")
+    years_int = int(rule.holding_years)
+    try:
+        eligible_date = purchase_date.replace(year=purchase_date.year + years_int)
+    except ValueError:
+        # Feb 29 purchase landing in a non-leap target year — round to Mar 1.
+        eligible_date = date(purchase_date.year + years_int, 3, 1)
 
-    if years_held < rule.holding_years:
+    if today < eligible_date:
         return False
 
     if rule.age_requirement is not None:

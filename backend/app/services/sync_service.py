@@ -23,8 +23,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.fund import Fund, NavHistory, Dividend
 from app.models.tax_lot import SyncJob
+from app.models.transaction import Transaction
 from app.services import sec_api
+from app.services.portfolio_service import invalidate_portfolio
 from app.services.sec_api import SecApiUnauthorizedError, SecApiError
+
+# Auto-dividend creation: uniform 10% WHT across every tax scheme, per
+# user direction. Marker note so users can tell auto-created from manual entries.
+DIVIDEND_WHT_RATE = Decimal("0.10")
+DIVIDEND_AUTO_NOTE = "Auto-imported from SEC dividend sync"
+_AMOUNT_QUANT = Decimal("0.01")
 
 logger = logging.getLogger(__name__)
 
@@ -425,6 +433,85 @@ async def sync_nav_range(db: AsyncSession, start_date: date, end_date: date, pro
 
 # ── Dividend sync (FundDailyInfo API) ─────────────────────────────────────────
 
+async def _auto_create_dividend_transactions(
+    db: AsyncSession,
+    fund_code: str,
+    ex_date: date,
+    dividend_per_unit: Decimal,
+) -> tuple[int, int, set[uuid.UUID]]:
+    """
+    For every portfolio holding `fund_code` at `ex_date` (across all tax schemes),
+    insert a DIVIDEND transaction representing the cash dividend received.
+
+    Returns (created_count, skipped_count, affected_portfolio_ids).
+
+    Skip rules:
+    - If any DIVIDEND tx already exists for (portfolio_id, fund_code, ex_date,
+      tax_scheme) → respect manual entry, skip.
+    - If computed units at ex_date <= 0 → portfolio wasn't holding, skip.
+    """
+    # Sum BUY+SWITCH_IN - SELL-SWITCH_OUT units per (portfolio, tax_scheme)
+    # up to and including ex_date.
+    rows = await db.execute(
+        select(
+            Transaction.portfolio_id,
+            Transaction.tax_scheme,
+            Transaction.type,
+            Transaction.units,
+        ).where(
+            Transaction.fund_code == fund_code,
+            Transaction.date <= ex_date,
+            Transaction.type.in_(["BUY", "SELL", "SWITCH_IN", "SWITCH_OUT"]),
+        )
+    )
+    units_by_key: dict[tuple[uuid.UUID, str], Decimal] = {}
+    for row in rows.all():
+        u = Decimal(str(row.units or 0))
+        key = (row.portfolio_id, row.tax_scheme)
+        delta = u if row.type in ("BUY", "SWITCH_IN") else -u
+        units_by_key[key] = units_by_key.get(key, Decimal("0")) + delta
+
+    created = 0
+    skipped = 0
+    affected: set[uuid.UUID] = set()
+    for (portfolio_id, tax_scheme), units in units_by_key.items():
+        if units <= 0:
+            continue
+        # Dedupe per (portfolio_id, fund_code, ex_date, tax_scheme) — manual
+        # entries take priority.
+        existing = await db.execute(
+            select(Transaction.id).where(
+                Transaction.portfolio_id == portfolio_id,
+                Transaction.fund_code == fund_code,
+                Transaction.date == ex_date,
+                Transaction.tax_scheme == tax_scheme,
+                Transaction.type == "DIVIDEND",
+            )
+        )
+        if existing.first() is not None:
+            skipped += 1
+            continue
+
+        amount = (units * dividend_per_unit).quantize(_AMOUNT_QUANT)
+        tax_withheld = (amount * DIVIDEND_WHT_RATE).quantize(_AMOUNT_QUANT)
+        db.add(Transaction(
+            id=uuid.uuid4(),
+            portfolio_id=portfolio_id,
+            date=ex_date,
+            type="DIVIDEND",
+            fund_code=fund_code,
+            amount=amount,
+            fee=Decimal("0"),
+            tax_withheld=tax_withheld,
+            tax_scheme=tax_scheme,
+            note=DIVIDEND_AUTO_NOTE,
+        ))
+        created += 1
+        affected.add(portfolio_id)
+
+    return created, skipped, affected
+
+
 async def sync_dividends(db: AsyncSession, proj_ids: set[str] | None = None) -> dict:
     """
     Fetch full dividend history for portfolio funds (or all funds if proj_ids is None).
@@ -444,6 +531,8 @@ async def sync_dividends(db: AsyncSession, proj_ids: set[str] | None = None) -> 
 
     job = await _start_job(db, "dividend_sync")
     synced = skipped = 0
+    auto_created = auto_skipped = 0
+    affected_portfolios: set[uuid.UUID] = set()
     errors: list[str] = []
 
     for fund in funds:
@@ -493,8 +582,31 @@ async def sync_dividends(db: AsyncSession, proj_ids: set[str] | None = None) -> 
                 ))
                 synced += 1
 
+            # Auto-create DIVIDEND transactions for every portfolio that held
+            # the fund on ex_date. Idempotent — re-runs hit the per-portfolio
+            # dedupe and skip.
+            c, s, affected = await _auto_create_dividend_transactions(
+                db, fund.fund_code, ex_date, amount,
+            )
+            auto_created += c
+            auto_skipped += s
+            affected_portfolios |= affected
+
+    # Drop stale analytics for every portfolio that received new dividends.
+    for pid in affected_portfolios:
+        invalidate_portfolio(pid)
+
     err_str = "; ".join(errors[:5]) if errors else None
-    notes = f"synced:{synced} skipped:{skipped}" if not err_str else None
+    notes = (
+        f"synced:{synced} skipped:{skipped} "
+        f"auto_dividends:created={auto_created} skipped={auto_skipped}"
+    ) if not err_str else None
     await _finish_job(db, job, err_str, notes)
     await db.commit()
-    return {"synced": synced, "skipped": skipped, "errors": errors}
+    return {
+        "synced": synced,
+        "skipped": skipped,
+        "auto_dividends_created": auto_created,
+        "auto_dividends_skipped": auto_skipped,
+        "errors": errors,
+    }

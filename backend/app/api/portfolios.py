@@ -23,8 +23,16 @@ class TransferHoldingIn(BaseModel):
 router = APIRouter(prefix="/portfolios", tags=["portfolios"])
 
 
-def _check_owner(portfolio: Portfolio, user: User) -> None:
+def _require_read_access(portfolio: Portfolio, user: User) -> None:
+    """Owner or admin may read."""
     if portfolio.user_id != user.id and user.role != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def _require_write_access(portfolio: Portfolio, user: User) -> None:
+    """Only the owner may mutate. Admin role does NOT grant write access on
+    another user's portfolio — admins manage user accounts, not user data."""
+    if portfolio.user_id != user.id:
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
@@ -59,7 +67,7 @@ async def get_portfolio(
     p = await db.get(Portfolio, portfolio_id)
     if not p:
         raise HTTPException(status_code=404, detail="Portfolio not found")
-    _check_owner(p, user)
+    _require_read_access(p, user)
     return p
 
 
@@ -73,7 +81,7 @@ async def update_portfolio(
     p = await db.get(Portfolio, portfolio_id)
     if not p:
         raise HTTPException(status_code=404, detail="Portfolio not found")
-    _check_owner(p, user)
+    _require_write_access(p, user)
     p.name = body.name
     await db.commit()
     await db.refresh(p)
@@ -90,7 +98,7 @@ async def refresh_analytics(
     p = await db.get(Portfolio, portfolio_id)
     if not p:
         raise HTTPException(status_code=404, detail="Portfolio not found")
-    _check_owner(p, user)
+    _require_write_access(p, user)
     invalidate_portfolio(portfolio_id)
 
 
@@ -108,12 +116,12 @@ async def transfer_holding(
     source = await db.get(Portfolio, portfolio_id)
     if not source:
         raise HTTPException(status_code=404, detail="Source portfolio not found")
-    _check_owner(source, user)
+    _require_write_access(source, user)
 
     target = await db.get(Portfolio, body.target_portfolio_id)
     if not target:
         raise HTTPException(status_code=404, detail="Target portfolio not found")
-    _check_owner(target, user)
+    _require_write_access(target, user)
 
     if source.id == target.id:
         raise HTTPException(status_code=400, detail="Source and target portfolio must be different")
@@ -172,6 +180,6 @@ async def delete_portfolio(
     p = await db.get(Portfolio, portfolio_id)
     if not p:
         raise HTTPException(status_code=404, detail="Portfolio not found")
-    _check_owner(p, user)
+    _require_write_access(p, user)
     await db.delete(p)
     await db.commit()

@@ -293,3 +293,17 @@ class TestHoldingPeriod:
         purchase = date(2024, 1, 1)
         today = date(2024, 1, 2)
         assert is_holding_eligible(self.NORMAL_RULE, purchase, today, user_age=None) is True
+
+    def test_anniversary_day_for_day_user_example(self):
+        """User's example: buy 2023-05-30, sellable on 2033-05-30 exactly.
+        Day-before is NOT eligible; day-of IS eligible."""
+        purchase = date(2023, 5, 30)
+        assert is_holding_eligible(self.SSF_RULE, purchase, date(2033, 5, 29), None) is False
+        assert is_holding_eligible(self.SSF_RULE, purchase, date(2033, 5, 30), None) is True
+
+    def test_feb_29_purchase_falls_back_to_mar_1_in_non_leap_year(self):
+        """Feb 29, 2024 + 5 years = 2029-Feb-29 doesn't exist → use 2029-03-01."""
+        purchase = date(2024, 2, 29)
+        # 5y anniversary lands on a non-leap year — eligible_date = Mar 1
+        assert is_holding_eligible(self.LTF_RULE, purchase, date(2029, 2, 28), None) is False
+        assert is_holding_eligible(self.LTF_RULE, purchase, date(2029, 3, 1), None) is True

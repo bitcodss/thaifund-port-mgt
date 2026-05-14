@@ -27,13 +27,23 @@ router = APIRouter(tags=["analytics"])
 
 
 async def _check_portfolio_access(portfolio_id: UUID, user: User, db: AsyncSession) -> Portfolio:
+    """Read access: owner or admin (admin = support read-only)."""
     from sqlalchemy import select
-    result = await db.execute(
-        select(Portfolio).where(Portfolio.id == portfolio_id, Portfolio.user_id == user.id)
-    )
-    p = result.scalar_one_or_none()
+    p = await db.get(Portfolio, portfolio_id)
     if not p:
         raise HTTPException(status_code=404, detail="Portfolio not found")
+    if p.user_id != user.id and user.role != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return p
+
+
+async def _require_portfolio_write(portfolio_id: UUID, user: User, db: AsyncSession) -> Portfolio:
+    """Write access: owner only. Admin role does NOT grant write."""
+    p = await db.get(Portfolio, portfolio_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+    if p.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
     return p
 
 
@@ -100,7 +110,7 @@ async def refresh_ai_summary(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    await _check_portfolio_access(portfolio_id, user, db)
+    await _require_portfolio_write(portfolio_id, user, db)
     data = await _build_ai_data(portfolio_id, db)
     content = await ai_service.generate_summary(portfolio_id, data, db)
     await db.commit()

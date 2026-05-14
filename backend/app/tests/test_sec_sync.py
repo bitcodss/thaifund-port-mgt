@@ -604,3 +604,189 @@ class TestSyncDividends:
         result = await db.execute(select(SyncJob).where(SyncJob.type == "dividend_sync"))
         job = result.scalar_one()
         assert job.status == "success"
+
+
+# ── M15: auto-create DIVIDEND transactions on dividend sync ───────────────────
+
+class TestAutoCreateDividendTransactions:
+    """Verifies the M15 behavior: sync_dividends auto-creates per-portfolio
+    DIVIDEND transactions for every holder of a fund on its ex_date, applies
+    10% WHT uniformly, and dedupes against manual entries."""
+
+    async def _stub_get_dividends(self, monkeypatch_target, dividend_value):
+        """Helper: monkeypatch sec_api.get_dividends to return one fixed dividend."""
+        ex_date = date(2025, 6, 15)
+        async def _fake(_key, _proj):
+            return [{
+                "book_close_date": ex_date.isoformat(),
+                "dividend_date": ex_date.isoformat(),
+                "dividend_value": str(dividend_value),
+            }]
+        return _fake, ex_date
+
+    @pytest.mark.asyncio
+    async def test_auto_creates_dividend_for_each_scheme_with_10pct_wht(self, db):
+        """A user holds 500 NORMAL + 200 SSF units of FUND_X at ex_date with
+        dpu=2. Auto-creation produces TWO rows: amount 1000 (WHT 100) and
+        amount 400 (WHT 40), per-scheme."""
+        from app.models.portfolio import Portfolio
+        from app.models.transaction import Transaction
+        from app.models.user import User
+
+        user = User(id=uuid.uuid4(), email="div@x", password_hash="x", role="user")
+        p = Portfolio(id=uuid.uuid4(), user_id=user.id, name="P")
+        fund = await _seed_fund(db, "FUND_X", proj_id="PROJX")
+        db.add_all([user, p])
+        # NORMAL position: BUY 500 units before ex_date
+        db.add(Transaction(
+            id=uuid.uuid4(), portfolio_id=p.id, date=date(2024, 1, 1),
+            type="BUY", fund_code="FUND_X", units=Decimal("500"),
+            nav=Decimal("10"), amount=Decimal("5000"),
+            fee=Decimal("0"), tax_withheld=Decimal("0"), tax_scheme="NORMAL",
+        ))
+        # SSF position: BUY 200 units before ex_date
+        db.add(Transaction(
+            id=uuid.uuid4(), portfolio_id=p.id, date=date(2024, 6, 1),
+            type="BUY", fund_code="FUND_X", units=Decimal("200"),
+            nav=Decimal("10"), amount=Decimal("2000"),
+            fee=Decimal("0"), tax_withheld=Decimal("0"), tax_scheme="SSF",
+        ))
+        await db.commit()
+
+        fake, ex_date = await self._stub_get_dividends("sec_api.get_dividends", Decimal("2"))
+        with patch("app.services.sync_service.sec_api.get_dividends", new=fake):
+            with patch("app.services.sync_service.settings") as mock_settings:
+                mock_settings.SEC_API_KEY = "fake-key"
+                result = await sync_service.sync_dividends(db, proj_ids={"PROJX"})
+
+        assert result["auto_dividends_created"] == 2
+        assert result["auto_dividends_skipped"] == 0
+
+        # Verify both rows
+        rows = await db.execute(
+            select(Transaction).where(
+                Transaction.portfolio_id == p.id,
+                Transaction.type == "DIVIDEND",
+                Transaction.date == ex_date,
+            )
+        )
+        divs = {(r.tax_scheme, r.amount, r.tax_withheld) for r in rows.scalars().all()}
+        assert (
+            "NORMAL", Decimal("1000.00"), Decimal("100.00"),
+        ) in divs
+        assert (
+            "SSF", Decimal("400.00"), Decimal("40.00"),
+        ) in divs
+
+    @pytest.mark.asyncio
+    async def test_skips_when_user_already_entered_dividend(self, db):
+        """If the user manually entered a DIVIDEND for the same (portfolio,
+        fund, ex_date, scheme), auto-creation skips that row."""
+        from app.models.portfolio import Portfolio
+        from app.models.transaction import Transaction
+        from app.models.user import User
+
+        user = User(id=uuid.uuid4(), email="d2@x", password_hash="x", role="user")
+        p = Portfolio(id=uuid.uuid4(), user_id=user.id, name="P")
+        fund = await _seed_fund(db, "FUND_X", proj_id="PROJX")
+        db.add_all([user, p])
+        db.add(Transaction(
+            id=uuid.uuid4(), portfolio_id=p.id, date=date(2024, 1, 1),
+            type="BUY", fund_code="FUND_X", units=Decimal("100"),
+            nav=Decimal("10"), amount=Decimal("1000"),
+            fee=Decimal("0"), tax_withheld=Decimal("0"), tax_scheme="NORMAL",
+        ))
+        # Pre-existing manual entry — different amount
+        ex_date = date(2025, 6, 15)
+        db.add(Transaction(
+            id=uuid.uuid4(), portfolio_id=p.id, date=ex_date,
+            type="DIVIDEND", fund_code="FUND_X",
+            amount=Decimal("999"), fee=Decimal("0"), tax_withheld=Decimal("99"),
+            tax_scheme="NORMAL", note="Manual entry",
+        ))
+        await db.commit()
+
+        fake, _ = await self._stub_get_dividends("sec_api.get_dividends", Decimal("2"))
+        with patch("app.services.sync_service.sec_api.get_dividends", new=fake):
+            with patch("app.services.sync_service.settings") as mock_settings:
+                mock_settings.SEC_API_KEY = "fake-key"
+                result = await sync_service.sync_dividends(db, proj_ids={"PROJX"})
+
+        assert result["auto_dividends_created"] == 0
+        assert result["auto_dividends_skipped"] == 1
+        # The original manual row must still be there, unchanged
+        rows = await db.execute(
+            select(Transaction).where(
+                Transaction.portfolio_id == p.id, Transaction.type == "DIVIDEND",
+            )
+        )
+        all_divs = rows.scalars().all()
+        assert len(all_divs) == 1
+        assert all_divs[0].amount == Decimal("999")
+
+    @pytest.mark.asyncio
+    async def test_skips_when_portfolio_held_zero_units_at_ex_date(self, db):
+        """A user who bought then fully sold before ex_date holds zero units;
+        no auto-dividend should be created."""
+        from app.models.portfolio import Portfolio
+        from app.models.transaction import Transaction
+        from app.models.user import User
+
+        user = User(id=uuid.uuid4(), email="d3@x", password_hash="x", role="user")
+        p = Portfolio(id=uuid.uuid4(), user_id=user.id, name="P")
+        fund = await _seed_fund(db, "FUND_X", proj_id="PROJX")
+        db.add_all([user, p])
+        ex_date = date(2025, 6, 15)
+        # BUY then SELL all, both before ex_date — net position = 0
+        db.add(Transaction(
+            id=uuid.uuid4(), portfolio_id=p.id, date=date(2024, 1, 1),
+            type="BUY", fund_code="FUND_X", units=Decimal("100"),
+            nav=Decimal("10"), amount=Decimal("1000"),
+            fee=Decimal("0"), tax_withheld=Decimal("0"), tax_scheme="NORMAL",
+        ))
+        db.add(Transaction(
+            id=uuid.uuid4(), portfolio_id=p.id, date=date(2024, 6, 1),
+            type="SELL", fund_code="FUND_X", units=Decimal("100"),
+            nav=Decimal("12"), amount=Decimal("1200"),
+            fee=Decimal("0"), tax_withheld=Decimal("0"), tax_scheme="NORMAL",
+        ))
+        await db.commit()
+
+        fake, _ = await self._stub_get_dividends("sec_api.get_dividends", Decimal("2"))
+        with patch("app.services.sync_service.sec_api.get_dividends", new=fake):
+            with patch("app.services.sync_service.settings") as mock_settings:
+                mock_settings.SEC_API_KEY = "fake-key"
+                result = await sync_service.sync_dividends(db, proj_ids={"PROJX"})
+
+        # Zero net units at ex_date → no auto-creation
+        assert result["auto_dividends_created"] == 0
+
+    @pytest.mark.asyncio
+    async def test_idempotent_on_rerun(self, db):
+        """Running sync_dividends a second time produces zero new auto-rows."""
+        from app.models.portfolio import Portfolio
+        from app.models.transaction import Transaction
+        from app.models.user import User
+
+        user = User(id=uuid.uuid4(), email="d4@x", password_hash="x", role="user")
+        p = Portfolio(id=uuid.uuid4(), user_id=user.id, name="P")
+        fund = await _seed_fund(db, "FUND_X", proj_id="PROJX")
+        db.add_all([user, p])
+        db.add(Transaction(
+            id=uuid.uuid4(), portfolio_id=p.id, date=date(2024, 1, 1),
+            type="BUY", fund_code="FUND_X", units=Decimal("100"),
+            nav=Decimal("10"), amount=Decimal("1000"),
+            fee=Decimal("0"), tax_withheld=Decimal("0"), tax_scheme="NORMAL",
+        ))
+        await db.commit()
+
+        fake, _ = await self._stub_get_dividends("sec_api.get_dividends", Decimal("2"))
+        with patch("app.services.sync_service.sec_api.get_dividends", new=fake):
+            with patch("app.services.sync_service.settings") as mock_settings:
+                mock_settings.SEC_API_KEY = "fake-key"
+                first = await sync_service.sync_dividends(db, proj_ids={"PROJX"})
+                second = await sync_service.sync_dividends(db, proj_ids={"PROJX"})
+
+        assert first["auto_dividends_created"] == 1
+        assert second["auto_dividends_created"] == 0
+        assert second["auto_dividends_skipped"] == 1
