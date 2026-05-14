@@ -201,3 +201,64 @@ class TestDuplicateDetection:
         rows, errors = parse_csv(StringIO(csv))
         assert len(rows) == 1  # first accepted, second deduplicated
         assert len(errors) == 1
+
+
+class TestSwitchTargetFundCrossCheck:
+    def test_switch_out_target_must_match_switch_in_fund(self):
+        csv = (
+            "date,type,fund_code,units,nav,amount,fee,tax_withheld,target_fund_code,pair_id,tax_scheme,note\n"
+            "2024-09-10,SWITCH_OUT,SCBSET,500,13.50,6750.00,0,0,WRONG_FUND,sw1,NORMAL,\n"
+            "2024-09-10,SWITCH_IN,SCBTOP,450,15.00,6750.00,0,0,SCBSET,sw1,NORMAL,\n"
+        )
+        rows, errors = parse_csv(StringIO(csv))
+        assert len(rows) == 0
+        assert any("target_fund_code" in e for e in errors)
+
+    def test_switch_legs_must_have_same_tax_scheme(self):
+        csv = (
+            "date,type,fund_code,units,nav,amount,fee,tax_withheld,target_fund_code,pair_id,tax_scheme,note\n"
+            "2024-09-10,SWITCH_OUT,SCBSET,500,13.50,6750.00,0,0,SCBTOP,sw1,SSF,\n"
+            "2024-09-10,SWITCH_IN,SCBTOP,450,15.00,6750.00,0,0,SCBSET,sw1,NORMAL,\n"
+        )
+        rows, errors = parse_csv(StringIO(csv))
+        assert len(rows) == 0
+        assert any("tax_scheme" in e for e in errors)
+
+    def test_switch_to_same_fund_is_rejected(self):
+        csv = (
+            "date,type,fund_code,units,nav,amount,fee,tax_withheld,target_fund_code,pair_id,tax_scheme,note\n"
+            "2024-09-10,SWITCH_OUT,SCBSET,500,13.50,6750.00,0,0,SCBSET,sw1,NORMAL,\n"
+            "2024-09-10,SWITCH_IN,SCBSET,500,13.50,6750.00,0,0,SCBSET,sw1,NORMAL,\n"
+        )
+        rows, errors = parse_csv(StringIO(csv))
+        assert len(rows) == 0
+        assert any("must differ" in e for e in errors)
+
+
+class TestPositiveNumberValidation:
+    def test_negative_units_rejected(self):
+        csv = (
+            "date,type,fund_code,units,nav,amount,fee,tax_withheld,target_fund_code,pair_id,tax_scheme,note\n"
+            "2024-01-01,BUY,SCBSET,-1000,12.00,-12000.00,0,0,,,NORMAL,\n"
+        )
+        rows, errors = parse_csv(StringIO(csv))
+        assert len(rows) == 0
+        assert any("positive" in e.lower() for e in errors)
+
+    def test_zero_amount_rejected(self):
+        csv = (
+            "date,type,fund_code,units,nav,amount,fee,tax_withheld,target_fund_code,pair_id,tax_scheme,note\n"
+            "2024-01-01,DIVIDEND,SCBSET,,,0.00,0,0,,,NORMAL,\n"
+        )
+        rows, errors = parse_csv(StringIO(csv))
+        assert len(rows) == 0
+        assert any("amount" in e.lower() and "positive" in e.lower() for e in errors)
+
+    def test_negative_fee_rejected(self):
+        csv = (
+            "date,type,fund_code,units,nav,amount,fee,tax_withheld,target_fund_code,pair_id,tax_scheme,note\n"
+            "2024-01-01,BUY,SCBSET,1000,12.00,12000.00,-5,0,,,NORMAL,\n"
+        )
+        rows, errors = parse_csv(StringIO(csv))
+        assert len(rows) == 0
+        assert any("fee" in e.lower() for e in errors)

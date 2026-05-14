@@ -83,6 +83,12 @@ export const api = {
     request<Transaction[]>("GET", `/portfolios/${portfolioId}/transactions`),
   addTransaction: (portfolioId: string, tx: TransactionCreate) =>
     request<Transaction>("POST", `/portfolios/${portfolioId}/transactions`, tx),
+  addSwitch: (portfolioId: string, switchOut: TransactionCreate, switchIn: TransactionCreate) =>
+    request<Transaction[]>(
+      "POST",
+      `/portfolios/${portfolioId}/transactions/switch`,
+      { switch_out: switchOut, switch_in: switchIn },
+    ),
   deleteTransaction: (portfolioId: string, txId: string) =>
     request<void>("DELETE", `/portfolios/${portfolioId}/transactions/${txId}`),
 

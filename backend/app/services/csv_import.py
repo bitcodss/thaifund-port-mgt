@@ -12,10 +12,11 @@ from decimal import Decimal, InvalidOperation
 from io import StringIO, TextIOWrapper
 from typing import Union
 
+from app.services.switch_validation import SwitchLeg, validate_switch_pair
+
 VALID_TYPES = {"BUY", "SELL", "SWITCH_OUT", "SWITCH_IN", "DIVIDEND", "INTEREST"}
 VALID_SCHEMES = {"NORMAL", "RMF", "SSF", "THAI_ESG", "THAI_ESG_EXTRA", "LTF"}
 AMOUNT_TOLERANCE = Decimal("0.01")
-SWITCH_AMOUNT_TOLERANCE_PCT = Decimal("0.005")
 
 
 @dataclass
@@ -83,12 +84,26 @@ def _parse_row(raw: dict, row_num: int) -> tuple[CsvRow | None, str | None]:
     if err:
         return None, err
 
+    # Sign checks — money and units must be positive; fees/withholding non-negative.
+    if amount <= 0:
+        return None, f"Row {row_num}: amount must be positive (got {amount})"
+    if fee < 0:
+        return None, f"Row {row_num}: fee must be non-negative (got {fee})"
+    if tax_withheld < 0:
+        return None, f"Row {row_num}: tax_withheld must be non-negative (got {tax_withheld})"
+
     # Type-specific validation
     if tx_type in {"BUY", "SELL", "SWITCH_OUT", "SWITCH_IN"}:
         if units is None:
             return None, f"Row {row_num}: units is required for {tx_type}"
         if nav is None:
             return None, f"Row {row_num}: nav is required for {tx_type}"
+        if units <= 0:
+            return None, f"Row {row_num}: units must be positive for {tx_type} (got {units})"
+        if nav <= 0:
+            return None, f"Row {row_num}: nav must be positive for {tx_type} (got {nav})"
+        if not fund_code:
+            return None, f"Row {row_num}: fund_code is required for {tx_type}"
         expected = (units * nav).quantize(Decimal("0.01"))
         actual = amount.quantize(Decimal("0.01"))
         if abs(expected - actual) > AMOUNT_TOLERANCE:
@@ -99,10 +114,6 @@ def _parse_row(raw: dict, row_num: int) -> tuple[CsvRow | None, str | None]:
     if tx_type == "DIVIDEND":
         if not fund_code:
             return None, f"Row {row_num}: fund_code is required for DIVIDEND"
-
-    if tx_type == "INTEREST":
-        if amount is None:
-            return None, f"Row {row_num}: amount is required for INTEREST"
 
     return CsvRow(
         date=tx_date,
@@ -182,22 +193,26 @@ def parse_csv(file: Union[StringIO, TextIOWrapper]) -> tuple[list[CsvRow], list[
     for pid in switch_out.keys() & switch_in.keys():
         out_row = switch_out[pid]
         in_row = switch_in[pid]
-        # Same date
-        if out_row.date != in_row.date:
+        pair_errors = validate_switch_pair(
+            SwitchLeg(
+                fund_code=out_row.fund_code or "",
+                target_fund_code=out_row.target_fund_code,
+                date=out_row.date,
+                tax_scheme=out_row.tax_scheme,
+                amount=out_row.amount,
+            ),
+            SwitchLeg(
+                fund_code=in_row.fund_code or "",
+                target_fund_code=in_row.target_fund_code,
+                date=in_row.date,
+                tax_scheme=in_row.tax_scheme,
+                amount=in_row.amount,
+            ),
+        )
+        if pair_errors:
             orphan_pair_ids.add(pid)
-            errors.append(
-                f"Switch pair '{pid}': SWITCH_OUT date {out_row.date} != SWITCH_IN date {in_row.date}"
-            )
-            continue
-        # Amount within 0.5%
-        if out_row.amount > Decimal("0"):
-            pct_diff = abs(out_row.amount - in_row.amount) / out_row.amount
-            if pct_diff > SWITCH_AMOUNT_TOLERANCE_PCT:
-                orphan_pair_ids.add(pid)
-                errors.append(
-                    f"Switch pair '{pid}': amount mismatch {out_row.amount} vs {in_row.amount} "
-                    f"({pct_diff:.2%} > 0.5%)"
-                )
+            for err in pair_errors:
+                errors.append(f"Switch pair '{pid}': {err}")
 
     # Remove orphaned switch rows from final output
     final: list[CsvRow] = []

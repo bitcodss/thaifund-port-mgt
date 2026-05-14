@@ -1,22 +1,31 @@
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
+
+
+TransactionType = Literal[
+    "BUY", "SELL", "SWITCH_OUT", "SWITCH_IN", "DIVIDEND", "INTEREST"
+]
+TaxScheme = Literal[
+    "NORMAL", "RMF", "SSF", "THAI_ESG", "THAI_ESG_EXTRA", "LTF"
+]
 
 
 class TransactionCreate(BaseModel):
     date: date
-    type: str
+    type: TransactionType
     fund_code: str | None = None
-    units: Decimal | None = None
-    nav: Decimal | None = None
-    amount: Decimal
-    fee: Decimal = Decimal("0")
-    tax_withheld: Decimal = Decimal("0")
+    units: Decimal | None = Field(default=None, gt=0)
+    nav: Decimal | None = Field(default=None, gt=0)
+    amount: Decimal = Field(..., gt=0)
+    fee: Decimal = Field(default=Decimal("0"), ge=0)
+    tax_withheld: Decimal = Field(default=Decimal("0"), ge=0)
     target_fund_code: str | None = None
     pair_id: str | None = None
-    tax_scheme: str = "NORMAL"
+    tax_scheme: TaxScheme = "NORMAL"
     note: str | None = None
 
     @model_validator(mode="after")
@@ -26,6 +35,8 @@ class TransactionCreate(BaseModel):
                 raise ValueError(f"units required for {self.type}")
             if self.nav is None:
                 raise ValueError(f"nav required for {self.type}")
+            if not self.fund_code:
+                raise ValueError(f"fund_code required for {self.type}")
         if self.type == "DIVIDEND" and not self.fund_code:
             raise ValueError("fund_code required for DIVIDEND")
         return self

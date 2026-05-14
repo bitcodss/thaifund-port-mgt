@@ -1273,6 +1273,26 @@ export default function PortfolioPage() {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState("");
 
+  // Switch dialog state — two legs share date, tax_scheme, note
+  const today = new Date().toISOString().slice(0, 10);
+  const [switchDialogOpen, setSwitchDialogOpen] = useState(false);
+  const [switchSubmitting, setSwitchSubmitting] = useState(false);
+  const [switchError, setSwitchError] = useState("");
+  const [switchForm, setSwitchForm] = useState({
+    date: today,
+    tax_scheme: "NORMAL",
+    source_fund_code: "",
+    source_units: "",
+    source_nav: "",
+    source_amount: "",
+    source_fee: "0",
+    target_fund_code: "",
+    target_units: "",
+    target_nav: "",
+    target_amount: "",
+    note: "",
+  });
+
   useEffect(() => {
     setPnlBasis(derivePnlBasis(loadSettings()));
     // Re-sync when settings change in another tab or the settings page
@@ -1313,6 +1333,23 @@ export default function PortfolioPage() {
       setForm((prev) => ({ ...prev, amount: (u * n).toFixed(2) }));
     }
   }, [form.units, form.nav, form.type]);
+
+  // Auto-compute switch leg amounts from units * nav
+  useEffect(() => {
+    const u = parseFloat(switchForm.source_units);
+    const n = parseFloat(switchForm.source_nav);
+    if (!isNaN(u) && !isNaN(n) && u > 0 && n > 0) {
+      setSwitchForm((prev) => ({ ...prev, source_amount: (u * n).toFixed(2) }));
+    }
+  }, [switchForm.source_units, switchForm.source_nav]);
+
+  useEffect(() => {
+    const u = parseFloat(switchForm.target_units);
+    const n = parseFloat(switchForm.target_nav);
+    if (!isNaN(u) && !isNaN(n) && u > 0 && n > 0) {
+      setSwitchForm((prev) => ({ ...prev, target_amount: (u * n).toFixed(2) }));
+    }
+  }, [switchForm.target_units, switchForm.target_nav]);
 
   async function reloadAnalytics() {
     const [sum, hold, alloc, lots] = await Promise.all([
@@ -1389,6 +1426,68 @@ export default function PortfolioPage() {
     } finally { setSubmitting(false); }
   }
 
+  async function handleAddSwitch(e: React.FormEvent) {
+    e.preventDefault();
+    setSwitchError("");
+    if (!switchForm.source_fund_code || !switchForm.target_fund_code) {
+      setSwitchError("Source and target funds are required");
+      return;
+    }
+    if (switchForm.source_fund_code === switchForm.target_fund_code) {
+      setSwitchError("Source and target funds must differ");
+      return;
+    }
+    setSwitchSubmitting(true);
+    try {
+      const out: TransactionCreate = {
+        date: switchForm.date,
+        type: "SWITCH_OUT",
+        fund_code: switchForm.source_fund_code,
+        units: switchForm.source_units,
+        nav: switchForm.source_nav,
+        amount: switchForm.source_amount,
+        fee: switchForm.source_fee || "0",
+        tax_withheld: "0",
+        target_fund_code: switchForm.target_fund_code,
+        tax_scheme: switchForm.tax_scheme,
+        note: switchForm.note || undefined,
+      };
+      const inLeg: TransactionCreate = {
+        date: switchForm.date,
+        type: "SWITCH_IN",
+        fund_code: switchForm.target_fund_code,
+        units: switchForm.target_units,
+        nav: switchForm.target_nav,
+        amount: switchForm.target_amount,
+        fee: "0",
+        tax_withheld: "0",
+        target_fund_code: switchForm.source_fund_code,
+        tax_scheme: switchForm.tax_scheme,
+        note: switchForm.note || undefined,
+      };
+      const created = await api.addSwitch(portfolioId, out, inLeg);
+      setTransactions((prev) => [...created, ...prev]);
+      setSwitchDialogOpen(false);
+      setSwitchForm({
+        date: today,
+        tax_scheme: "NORMAL",
+        source_fund_code: "",
+        source_units: "",
+        source_nav: "",
+        source_amount: "",
+        source_fee: "0",
+        target_fund_code: "",
+        target_units: "",
+        target_nav: "",
+        target_amount: "",
+        note: "",
+      });
+      await reloadAnalytics();
+    } catch (err: unknown) {
+      setSwitchError(err instanceof Error ? err.message : "Failed to record switch");
+    } finally { setSwitchSubmitting(false); }
+  }
+
   async function handleImport(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1442,6 +1541,91 @@ export default function PortfolioPage() {
           <Button variant="ghost" size="sm" onClick={() => setDeleteConfirm(true)} title="Delete portfolio">
             <Trash2 className="h-4 w-4 text-destructive" />
           </Button>
+          <Dialog open={switchDialogOpen} onOpenChange={setSwitchDialogOpen}>
+            <DialogTrigger asChild>
+              <Button size="sm" variant="outline">
+                <span className="hidden sm:inline">Record Switch</span>
+                <span className="sm:hidden">↔</span>
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+              <DialogHeader><DialogTitle>Record Fund Switch</DialogTitle></DialogHeader>
+              <form onSubmit={handleAddSwitch} className="space-y-3 mt-2">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <Label>Date</Label>
+                    <Input type="date" value={switchForm.date} onChange={(e) => setSwitchForm({ ...switchForm, date: e.target.value })} required />
+                  </div>
+                  <div className="space-y-1">
+                    <Label>Tax Scheme</Label>
+                    <Select value={switchForm.tax_scheme} onValueChange={(v) => setSwitchForm({ ...switchForm, tax_scheme: v })}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>{SCHEMES.map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                <div className="space-y-2 rounded-md border p-3">
+                  <p className="text-sm font-medium">Switch Out (source)</p>
+                  <div className="space-y-1">
+                    <Label>Fund</Label>
+                    <FundSearchInput value={switchForm.source_fund_code} onChange={(code) => setSwitchForm((f) => ({ ...f, source_fund_code: code }))} />
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="space-y-1">
+                      <Label>Units</Label>
+                      <Input type="number" step="any" value={switchForm.source_units} onChange={(e) => setSwitchForm({ ...switchForm, source_units: e.target.value })} required />
+                    </div>
+                    <div className="space-y-1">
+                      <Label>NAV</Label>
+                      <Input type="number" step="any" value={switchForm.source_nav} onChange={(e) => setSwitchForm({ ...switchForm, source_nav: e.target.value })} required />
+                    </div>
+                    <div className="space-y-1">
+                      <Label>Amount <span className="text-xs text-muted-foreground font-normal">auto</span></Label>
+                      <Input type="number" step="any" value={switchForm.source_amount} onChange={(e) => setSwitchForm({ ...switchForm, source_amount: e.target.value })} required />
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <Label>Fee (฿)</Label>
+                    <Input type="number" step="any" value={switchForm.source_fee} onChange={(e) => setSwitchForm({ ...switchForm, source_fee: e.target.value })} />
+                  </div>
+                </div>
+
+                <div className="space-y-2 rounded-md border p-3">
+                  <p className="text-sm font-medium">Switch In (target)</p>
+                  <div className="space-y-1">
+                    <Label>Fund</Label>
+                    <FundSearchInput value={switchForm.target_fund_code} onChange={(code) => setSwitchForm((f) => ({ ...f, target_fund_code: code }))} />
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="space-y-1">
+                      <Label>Units</Label>
+                      <Input type="number" step="any" value={switchForm.target_units} onChange={(e) => setSwitchForm({ ...switchForm, target_units: e.target.value })} required />
+                    </div>
+                    <div className="space-y-1">
+                      <Label>NAV</Label>
+                      <Input type="number" step="any" value={switchForm.target_nav} onChange={(e) => setSwitchForm({ ...switchForm, target_nav: e.target.value })} required />
+                    </div>
+                    <div className="space-y-1">
+                      <Label>Amount <span className="text-xs text-muted-foreground font-normal">auto</span></Label>
+                      <Input type="number" step="any" value={switchForm.target_amount} onChange={(e) => setSwitchForm({ ...switchForm, target_amount: e.target.value })} required />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <Label>Note</Label>
+                  <Input placeholder="Optional note" value={switchForm.note} onChange={(e) => setSwitchForm({ ...switchForm, note: e.target.value })} />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Both legs must share the same date and tax scheme. Amounts must agree within 0.5%. The lot&apos;s
+                  original purchase date and cost basis are inherited from the source fund.
+                </p>
+                {switchError && <p className="text-sm text-destructive">{switchError}</p>}
+                <Button type="submit" className="w-full" disabled={switchSubmitting}>{switchSubmitting ? "Recording…" : "Record Switch"}</Button>
+              </form>
+            </DialogContent>
+          </Dialog>
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
             <DialogTrigger asChild>
               <Button size="sm">

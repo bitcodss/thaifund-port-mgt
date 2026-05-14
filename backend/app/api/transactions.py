@@ -23,6 +23,7 @@ from app.services import transaction_service as svc
 from app.services.csv_import import parse_csv
 from app.services.lot_engine import InsufficientUnitsError
 from app.services.portfolio_service import invalidate_portfolio
+from app.services.switch_validation import SwitchLeg, validate_switch_pair
 from sqlalchemy import select as sa_select, delete as sa_delete
 
 router = APIRouter(prefix="/portfolios/{portfolio_id}/transactions", tags=["transactions"])
@@ -110,6 +111,25 @@ async def add_switch(
 
     if switch_out.type != "SWITCH_OUT" or switch_in.type != "SWITCH_IN":
         raise HTTPException(status_code=400, detail="Must supply one SWITCH_OUT and one SWITCH_IN")
+
+    errors = validate_switch_pair(
+        SwitchLeg(
+            fund_code=switch_out.fund_code or "",
+            target_fund_code=switch_out.target_fund_code,
+            date=switch_out.date,
+            tax_scheme=switch_out.tax_scheme,
+            amount=switch_out.amount,
+        ),
+        SwitchLeg(
+            fund_code=switch_in.fund_code or "",
+            target_fund_code=switch_in.target_fund_code,
+            date=switch_in.date,
+            tax_scheme=switch_in.tax_scheme,
+            amount=switch_in.amount,
+        ),
+    )
+    if errors:
+        raise HTTPException(status_code=400, detail="; ".join(errors))
 
     pair_id = str(uuid.uuid4())
     tx_out = Transaction(id=uuid.uuid4(), portfolio_id=portfolio_id, pair_id=pair_id, **switch_out.model_dump(exclude={"pair_id"}))
