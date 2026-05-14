@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     FINNOMENA_EMAIL: str = ""
     FINNOMENA_PASSWORD: str = ""
 
+    # Comma-separated list of origins allowed to call the API from a browser.
+    # Default suits a local docker-compose dev/self-host setup.
+    CORS_ORIGINS: str = "http://localhost:3000"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+
     @property
     def DATABASE_URL(self) -> str:
         return (

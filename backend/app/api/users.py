@@ -6,9 +6,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.user import User
-from app.schemas.user import UserCreate, UserOut, UserUpdate
+from app.schemas.user import SelfUserUpdate, UserCreate, UserOut, UserUpdate
 from app.api.deps import require_admin, get_current_user
-from app.services.auth_service import hash_password
+from app.services.auth_service import hash_password, verify_password
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -20,15 +20,22 @@ async def get_me(user: User = Depends(get_current_user)):
 
 @router.patch("/me", response_model=UserOut)
 async def update_me(
-    body: UserUpdate,
+    body: SelfUserUpdate,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Allow any logged-in user to update their own date_of_birth (and password)."""
+    """Self-service update: date_of_birth and/or password.
+
+    Password changes require `current_password` to match — defends against
+    session-token theft turning into an account lockout. Admin user mutation
+    happens via /users/{id} and doesn't have this gate.
+    """
+    if body.password is not None:
+        if not body.current_password or not verify_password(body.current_password, user.password_hash):
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
+        user.password_hash = hash_password(body.password)
     if body.date_of_birth is not None:
         user.date_of_birth = body.date_of_birth
-    if body.password is not None:
-        user.password_hash = hash_password(body.password)
     await db.commit()
     await db.refresh(user)
     return user

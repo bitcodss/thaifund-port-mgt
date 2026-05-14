@@ -75,10 +75,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Thai Fund Tracker API", version="1.0.0", lifespan=lifespan)
 
+# CORS: explicit origins only. Bearer tokens travel in the Authorization header
+# (not cookies), so allow_credentials stays off — that combo with allow_origins=["*"]
+# was both spec-invalid and unnecessary for this auth model.
+from app.config import settings as _cfg
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cfg.cors_origin_list,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
