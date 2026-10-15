@@ -7,13 +7,11 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
-import { ArrowLeft, RefreshCw, Database, TrendingUp, Landmark, Loader2, CheckCircle2, XCircle, Tags } from "lucide-react";
+import { ArrowLeft, RefreshCw, TrendingUp, Landmark, Loader2, CheckCircle2, XCircle, Tags } from "lucide-react";
 
 // Maps each action key to matching job types from the backend
 const JOB_MATCH: Record<string, (t: string) => boolean> = {
-  funds:     (t) => t === "fund_metadata",
-  nav:       (t) => t.startsWith("nav_sync:"),
-  backfill:  (t) => t.startsWith("nav_backfill:"),
+  nav:       (t) => t.startsWith("nav_backfill:"),
   dividends: (t) => t === "dividend_sync",
   categories: (t) => t === "fund_category",
 };
@@ -44,9 +42,10 @@ function IndeterminateBar() {
 export default function SyncPage() {
   const router = useRouter();
   const [jobs, setJobs] = useState<SyncJob[]>([]);
-  const [navDate, setNavDate] = useState(new Date().toISOString().slice(0, 10));
-  const threeMonthsAgo = new Date(); threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
-  const [backfillStart, setBackfillStart] = useState(threeMonthsAgo.toISOString().slice(0, 10));
+  // Default 7 days: a range costs one SEC call per fund regardless of length,
+  // and re-fetching recent days picks up late-published NAVs.
+  const sevenDaysAgo = new Date(); sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+  const [backfillStart, setBackfillStart] = useState(sevenDaysAgo.toISOString().slice(0, 10));
   const [backfillEnd, setBackfillEnd] = useState(new Date().toISOString().slice(0, 10));
   const [backfillPortfolioOnly, setBackfillPortfolioOnly] = useState(true);
   const [categoriesForce, setCategoriesForce] = useState(false);
@@ -113,36 +112,11 @@ export default function SyncPage() {
 
   const syncActions = [
     {
-      key: "funds",
-      icon: <Database className="h-5 w-5" />,
-      title: "Fund Metadata",
-      description: "Sync fund names, AMC, asset class, risk level from SEC Factsheet API. Run this first before NAV sync.",
-      action: () => trigger("funds", api.syncFunds),
-    },
-    {
       key: "nav",
       icon: <TrendingUp className="h-5 w-5" />,
-      title: "NAV History",
-      description: "Sync daily NAV for your portfolio funds for the selected date.",
-      action: () => trigger("nav", () => api.syncNav(navDate)),
-      extra: (
-        <div className="flex items-center gap-2 mt-2">
-          <Input
-            type="date"
-            value={navDate}
-            onChange={(e) => setNavDate(e.target.value)}
-            className="h-8 w-40 text-sm"
-          />
-          <span className="text-xs text-muted-foreground">Defaults to today</span>
-        </div>
-      ),
-    },
-    {
-      key: "backfill",
-      icon: <TrendingUp className="h-5 w-5" />,
-      title: "NAV Backfill",
-      description: "Load historical NAV for your portfolio funds over a date range. Required to see 7D/30D/6M/1Y/MAX returns. Skips weekends.",
-      action: () => trigger("backfill", () => api.syncNavBackfill(backfillStart, backfillEnd, backfillPortfolioOnly)),
+      title: "NAV Sync",
+      description: "Fetch NAV for a date range (one request per fund, any length). Defaults to the last 7 days to pick up late-published prices; widen the range to load history for charts, returns and risk metrics.",
+      action: () => trigger("nav", () => api.syncNavBackfill(backfillStart, backfillEnd, backfillPortfolioOnly)),
       extra: (
         <div className="mt-2 space-y-2">
           <div className="flex items-center gap-2 flex-wrap">
@@ -190,7 +164,7 @@ export default function SyncPage() {
       key: "categories",
       icon: <Tags className="h-5 w-5" />,
       title: "Fund Categories",
-      description: "Classify your portfolio funds by region and theme (e.g. AI · US Equity) using the local AI model, and refresh SEC style, master fund, FX hedge and top holdings. Runs weekly after Fund Metadata.",
+      description: "Classify your portfolio funds by region and theme (e.g. AI · US Equity) using the local AI model, and refresh SEC style, master fund, FX hedge and top holdings. Runs daily at 00:00 after the automatic fund metadata sync.",
       action: () => trigger("categories", () => api.syncCategories(categoriesForce)),
       extra: (
         <label className="flex items-center gap-2 cursor-pointer mt-2">

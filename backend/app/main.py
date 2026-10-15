@@ -84,8 +84,8 @@ async def _run_nav_catchup() -> None:
             logger.exception("NAV catch-up failed")
 
 
-async def _weekly_metadata_sync():
-    """Runs Sunday 01:00 UTC."""
+async def _daily_metadata_sync():
+    """Runs daily 00:00 ICT: fund metadata, then categories (LLM only for changed funds)."""
     async with AsyncSessionLocal() as db:
         try:
             result = await sync_service.sync_fund_metadata(db)
@@ -128,7 +128,7 @@ async def lifespan(app: FastAPI):
     # NAV, which is when SEC FundDailyInfo data has actually been published.
     # Sun/Mon are no-ops because the prior day is a weekend.
     scheduler.add_job(_run_nav_catchup, CronTrigger(day_of_week="tue-sat", hour=2, minute=0))
-    scheduler.add_job(_weekly_metadata_sync, CronTrigger(day_of_week="sun", hour=1, minute=0))
+    scheduler.add_job(_daily_metadata_sync, CronTrigger(hour=0, minute=0, timezone="Asia/Bangkok"))
     scheduler.add_job(_daily_dividend_sync, CronTrigger(hour=13, minute=30))
     scheduler.start()
     yield

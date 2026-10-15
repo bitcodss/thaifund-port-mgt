@@ -58,11 +58,6 @@ export const api = {
     request<CurrentUser>("PATCH", "/users/me", { date_of_birth }),
 
   // Sync (admin only)
-  syncFunds: () => request<{ status: string; message: string }>("POST", "/sync/funds"),
-  syncNav: (navDate?: string) =>
-    request<{ status: string; date: string; message: string }>(
-      "POST", `/sync/nav${navDate ? `?nav_date=${navDate}` : ""}`,
-    ),
   syncNavBackfill: (startDate: string, endDate?: string, portfolioOnly?: boolean) => {
     const params = new URLSearchParams({ start_date: startDate });
     if (endDate) params.set("end_date", endDate);
