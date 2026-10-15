@@ -1,7 +1,7 @@
 """
 Phase 2 sync orchestration.
 
-sync_fund_metadata()  — discovers all funds via FundFactsheet API (needs SEC_FACTSHEET_KEY)
+sync_fund_metadata()  — discovers all funds via SEC v2 Fund API general-info/profiles
 sync_nav_for_date()   — fetches daily NAV for all funds with sec_proj_id set
 sync_dividends()      — fetches dividend history for all funds with sec_proj_id set
 
@@ -58,6 +58,23 @@ def _policy_to_asset_class(policy_desc: str | None) -> str | None:
     return None
 
 
+# v2 profiles return full status words; we keep storing the legacy 2-letter codes
+# (existing rows and the active-fund filters use them).
+_FUND_STATUS_CODES = {
+    "Registered": "RG",
+    "IPO": "SE",
+    "Expired": "EX",
+    "Canceled": "CA",
+    "Liquidated": "LI",
+}
+
+
+def _fund_status_code(status: str | None) -> str | None:
+    if not status:
+        return None
+    return _FUND_STATUS_CODES.get(status, status[:10])
+
+
 def _volatility_to_risk_level(pct: float) -> int:
     if pct < 2:   return 1
     if pct < 5:   return 2
@@ -71,18 +88,19 @@ def _volatility_to_risk_level(pct: float) -> int:
 
 def _latest_volatility_by_class(perf_rows: list[dict]) -> dict[str, float]:
     """
-    From the /performance endpoint rows, extract the latest 1-year volatility
-    per class_abbr_name. Returns {class_abbr_name: volatility_pct}.
+    From the /performance endpoint rows, extract the latest 1-year fund volatility
+    per fund_class_name. Returns {fund_class_name: volatility_pct}.
     """
-    best: dict[str, tuple[str, float]] = {}  # class → (as_of_date, pct)
+    best: dict[str, tuple[str, float]] = {}  # class → (start_date, pct)
     for row in perf_rows:
-        if "ผันผวน" not in (row.get("performance_type_desc") or ""):
+        # "ความผันผวนของกองทุนรวม" = fund volatility; skip "...ของตัวชี้วัด" (benchmark)
+        if "ผันผวนของกองทุน" not in (row.get("performance_type_desc") or ""):
             continue
         if (row.get("reference_period") or "").strip() != "1 year":
             continue
-        cls = (row.get("class_abbr_name") or "").strip()
-        val_str = row.get("performance_val")
-        as_of = row.get("as_of_date") or ""
+        cls = (row.get("fund_class_name") or "").strip()
+        val_str = row.get("performance_value")
+        as_of = row.get("start_date") or ""
         if not cls or val_str is None:
             continue
         try:
@@ -152,7 +170,7 @@ async def _funds_with_proj_id(db: AsyncSession, active_only: bool = False) -> Se
 
 async def sync_fund_metadata(db: AsyncSession) -> dict:
     """
-    Fetch all AMCs → all funds from FundFactsheet API.
+    Fetch all AMCs → all funds from the v2 general-info API.
     Upserts fund rows (fund_code, sec_proj_id, name, amc, fund_status).
     Returns {"created": n, "updated": n, "errors": [...]}.
     Raises SecApiUnauthorizedError if FundFactsheet key is not subscribed.
@@ -167,23 +185,13 @@ async def sync_fund_metadata(db: AsyncSession) -> dict:
 
     amcs = await sec_api.list_amcs(settings.SEC_API_KEY)
     if not amcs:
-        await _finish_job(db, job, "No AMCs returned from FundDailyInfo/amc")
+        await _finish_job(db, job, "No AMCs returned from general-info/amcs")
         await db.commit()
         return {"created": 0, "updated": 0, "errors": ["No AMCs available"]}
 
-    # FundDailyInfo only lists ~27 AMCs; supplement with the FundFactsheet AMC list
-    # so that AMCs registered with SEC but absent from FundDailyInfo (e.g. Eastspring)
-    # also get their sec_proj_id populated.
-    try:
-        factsheet_amcs = await sec_api.list_factsheet_amcs(key)
-        known_ids = {a.get("unique_id") for a in amcs}
-        amcs = amcs + [a for a in factsheet_amcs if a.get("unique_id") not in known_ids]
-    except Exception as e:
-        errors.append(f"FundFactsheet AMC list failed: {e}")
-
     for amc in amcs:
         amc_id = amc.get("unique_id", "")
-        amc_name = amc.get("name_en", "")
+        amc_name = (amc.get("comp_name_en") or amc.get("name_en") or "").strip()
         try:
             funds = await sec_api.list_amc_funds(key, amc_id)
         except SecApiUnauthorizedError:
@@ -214,7 +222,7 @@ async def sync_fund_metadata(db: AsyncSession) -> dict:
             fund.name_en = fdata.get("proj_name_en") or fdata.get("fund_name_en")
             fund.amc = amc_name
             fund.amc_unique_id = amc_id
-            fund.fund_status = fdata.get("fund_status")
+            fund.fund_status = _fund_status_code(fdata.get("fund_status"))
             fund.last_synced_at = datetime.now(timezone.utc)
 
     # ── Enrich asset_class + risk_level via /policy and /performance ──────────
@@ -280,7 +288,7 @@ async def sync_fund_metadata(db: AsyncSession) -> dict:
     return {"created": created, "updated": updated, "errors": errors}
 
 
-# ── NAV sync (FundDailyInfo API) ──────────────────────────────────────────────
+# ── NAV sync (v2 daily-info/nav) ──────────────────────────────────────────────
 
 async def get_portfolio_proj_ids(db: AsyncSession) -> set[str]:
     """Return unique sec_proj_ids for all funds referenced in any portfolio transaction."""
@@ -338,22 +346,26 @@ async def sync_nav_for_date(db: AsyncSession, nav_date: date, proj_ids: set[str]
         fund_synced = False
 
         for entry in entries:
-            # Use class_abbr_name when present (e.g. "SCBSEMI(SSF)"), else fall back to fund code
-            class_abbr = (entry.get("class_abbr_name") or "").strip()
-            # "main" is a generic SEC API placeholder, not a real fund abbreviation
-            nav_code = class_abbr if class_abbr and class_abbr.lower() != "main" else fund.fund_code
+            # Use fund_class_name when present (e.g. "KKP DIVIDEND-SSF"), else fall back to fund code
+            class_abbr = (entry.get("fund_class_name") or entry.get("class_abbr_name") or "").strip()
+            # "main" / "-" are generic SEC API placeholders, not real fund abbreviations
+            nav_code = class_abbr if class_abbr and class_abbr.lower() not in ("main", "-") else fund.fund_code
 
             nav_val = entry.get("last_val") or entry.get("nav_value")
-            prev_val = entry.get("previous_val") or entry.get("prev_nav_value")
             if nav_val is None:
                 continue
 
             nav_dec = Decimal(str(nav_val))
+            # v2 has no previous_val — compare against the latest stored NAV before this date
+            prev_dec = (await db.execute(
+                select(NavHistory.nav)
+                .where(NavHistory.fund_code == nav_code, NavHistory.trade_date < nav_date)
+                .order_by(NavHistory.trade_date.desc())
+                .limit(1)
+            )).scalar()
             change_pct: Decimal | None = None
-            if prev_val:
-                prev_dec = Decimal(str(prev_val))
-                if prev_dec > 0:
-                    change_pct = ((nav_dec - prev_dec) / prev_dec * 100).quantize(Decimal("0.00000001"))
+            if prev_dec:
+                change_pct = ((nav_dec - prev_dec) / prev_dec * 100).quantize(Decimal("0.00000001"))
 
             # Auto-create a Fund record for this class if it doesn't exist yet
             class_fund = await db.get(Fund, nav_code)
@@ -431,7 +443,7 @@ async def sync_nav_range(db: AsyncSession, start_date: date, end_date: date, pro
     return {"days_attempted": days_attempted, "days_skipped": days_skipped}
 
 
-# ── Dividend sync (FundDailyInfo API) ─────────────────────────────────────────
+# ── Dividend sync (v2 daily-info/dividend-history) ─────────────────────────────────────────
 
 async def _auto_create_dividend_transactions(
     db: AsyncSession,

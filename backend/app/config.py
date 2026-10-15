@@ -15,8 +15,8 @@ class Settings(BaseSettings):
     FIRST_ADMIN_EMAIL: str
     FIRST_ADMIN_PASSWORD: str
 
-    SEC_API_KEY: str = ""               # Fund Daily Info API key
-    SEC_FACTSHEET_KEY: str = ""         # Fund Factsheet API key (separate subscription)
+    SEC_API_KEY: str = ""               # SEC v2 Fund API key (NAV, dividends, metadata)
+    SEC_FACTSHEET_KEY: str = ""         # optional override for metadata sync
 
     # fallback: use SEC_API_KEY when SEC_FACTSHEET_KEY not set
     @property

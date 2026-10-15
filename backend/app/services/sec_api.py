@@ -1,9 +1,12 @@
 """
-SEC Thailand Open Data API client.
+SEC Thailand Open Data API client (v2 "Fund API", product sec-openapi-normal).
 
-Two separate API products — each requires its own subscription key:
-  FundDailyInfo   → SEC_API_KEY      (NAV + dividends per fund)
-  FundFactsheet   → SEC_FACTSHEET_KEY (fund metadata + proj_id discovery)
+One subscription key (SEC_API_KEY) covers NAV, dividends and factsheet data.
+The legacy /FundDailyInfo and /FundFactsheet APIs were retired on 2026-07-01
+and now answer every request with HTTP 503.
+
+v2 list endpoints wrap results as {message, page_size, next_cursor, items};
+_get_items() follows next_cursor until it is empty. HTTP 204 = no data.
 
 Rate limit: 3,000 req / 300 s ≈ 10 req/s.
 On HTTP 421 (SEC rate limit): back off per Retry-After header.
@@ -21,8 +24,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-FACTSHEET_BASE = "https://api.sec.or.th/FundFactsheet"
-DAILY_INFO_BASE = "https://api.sec.or.th/FundDailyInfo"
+FUND_BASE = "https://api.sec.or.th/v2/fund"
 
 _REQUEST_INTERVAL = 0.11          # 9 req/s — stay comfortably under 10
 _MAX_RETRIES = 3
@@ -54,7 +56,7 @@ class _ThrottledClient:
         self._last_call: float = 0.0
         self._lock = asyncio.Lock()
 
-    async def get(self, url: str) -> Any | None:
+    async def get(self, url: str, params: dict | None = None) -> Any | None:
         async with self._lock:
             now = time.monotonic()
             gap = _REQUEST_INTERVAL - (now - self._last_call)
@@ -66,7 +68,7 @@ class _ThrottledClient:
         for attempt in range(_MAX_RETRIES):
             try:
                 async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                    resp = await client.get(url, headers=headers)
+                    resp = await client.get(url, headers=headers, params=params)
             except httpx.RequestError as exc:
                 logger.warning("Network error %s: %s", url, exc)
                 if attempt == _MAX_RETRIES - 1:
@@ -109,63 +111,70 @@ def _client_for(key: str) -> _ThrottledClient:
     return _clients[key]
 
 
-# ── FundDailyInfo API ─────────────────────────────────────────────────────────
+async def _get_items(key: str, path: str, params: dict | None = None) -> list[dict]:
+    """GET a v2 list endpoint and return all `items`, following next_cursor."""
+    params = {**(params or {}), "page_size": 100}
+    items: list[dict] = []
+    while True:
+        result = await _client_for(key).get(f"{FUND_BASE}{path}", params=params)
+        if not result:
+            return items
+        items.extend(result.get("items") or [])
+        cursor = result.get("next_cursor")
+        if not cursor:
+            return items
+        params = {**params, "next_cursor": cursor}
+
+
+# ── Daily info ────────────────────────────────────────────────────────────────
 
 async def list_amcs(key: str) -> list[dict]:
-    """GET /FundDailyInfo/amc → all 27 AMCs with unique_id."""
-    result = await _client_for(key).get(f"{DAILY_INFO_BASE}/amc")
-    return result or []
+    """GET /general-info/amcs → AMCs with unique_id, comp_name_en, comp_name_th."""
+    return await _get_items(key, "/general-info/amcs")
 
 
-async def get_daily_nav(key: str, proj_id: str, nav_date: date) -> dict | list | None:
+async def get_daily_nav(key: str, proj_id: str, nav_date: date) -> list[dict]:
     """
-    GET /FundDailyInfo/{proj_id}/dailynav/{date}
-    Returns a list of dicts (one per share class) with keys: last_val, previous_val, etc.
-    Some older endpoints return a single dict. Returns None on weekend/holiday (HTTP 204).
+    GET /daily-info/nav for a single date.
+    Returns one dict per share class with keys: fund_class_name, nav_date, last_val, ...
+    Returns [] on weekend/holiday (HTTP 204).
     """
     date_str = nav_date.strftime("%Y-%m-%d")
-    return await _client_for(key).get(f"{DAILY_INFO_BASE}/{proj_id}/dailynav/{date_str}")
+    return await _get_items(key, "/daily-info/nav", {
+        "proj_id": proj_id, "start_nav_date": date_str, "end_nav_date": date_str,
+    })
 
 
 async def get_dividends(key: str, proj_id: str) -> list[dict]:
     """
-    GET /FundDailyInfo/{proj_id}/dividend
+    GET /daily-info/dividend-history
     Returns list of dividend events with keys:
-      book_close_date, dividend_date, dividend_value, unit_base
+      class_abbr_name, book_close_date, dividend_date, dividend_value
     """
-    result = await _client_for(key).get(f"{DAILY_INFO_BASE}/{proj_id}/dividend")
-    return result or []
+    return await _get_items(key, "/daily-info/dividend-history", {"proj_id": proj_id})
 
 
-# ── FundFactsheet API (requires separate subscription) ────────────────────────
-
-async def list_factsheet_amcs(key: str) -> list[dict]:
-    """GET /FundFactsheet/fund/amc → all AMCs registered with SEC (superset of FundDailyInfo list)."""
-    result = await _client_for(key).get(f"{FACTSHEET_BASE}/fund/amc")
-    return result or []
-
+# ── General info / factsheet ──────────────────────────────────────────────────
 
 async def list_amc_funds(key: str, amc_unique_id: str) -> list[dict]:
     """
-    GET /FundFactsheet/fund/amc/{unique_id}
+    GET /general-info/profiles filtered by AMC.
     Returns list of fund dicts with proj_id, proj_abbr_name, proj_name_th/en,
-    fund_status, regis_date, cancel_date.
-    Raises SecApiUnauthorizedError if not subscribed to FundFactsheet.
+    fund_status, policy_desc, regis_date, cancel_date.
     """
-    result = await _client_for(key).get(f"{FACTSHEET_BASE}/fund/amc/{amc_unique_id}")
-    return result or []
+    return await _get_items(key, "/general-info/profiles", {"company_info": amc_unique_id})
 
 
 async def get_fund_policy(key: str, proj_id: str) -> dict | None:
-    """GET /FundFactsheet/fund/{proj_id}/policy → policy_desc (asset class in Thai), management_style."""
-    return await _client_for(key).get(f"{FACTSHEET_BASE}/fund/{proj_id}/policy")
+    """GET /general-info/profiles for one fund → policy_desc (asset class in Thai)."""
+    items = await _get_items(key, "/general-info/profiles", {"project_info": proj_id})
+    return next((i for i in items if i.get("proj_id") == proj_id), None)
 
 
 async def get_fund_performance(key: str, proj_id: str) -> list[dict]:
     """
-    GET /FundFactsheet/fund/{proj_id}/performance
-    Returns list of rows with class_abbr_name, performance_type_desc, performance_val, as_of_date.
-    Filter for rows where performance_type_desc contains 'ผันผวน' to get annualised volatility.
+    GET /factsheet/performance (latest factsheet)
+    Returns list of rows with fund_class_name, performance_type_desc,
+    reference_period, performance_value, start_date.
     """
-    result = await _client_for(key).get(f"{FACTSHEET_BASE}/fund/{proj_id}/performance")
-    return result or []
+    return await _get_items(key, "/factsheet/performance", {"proj_id": proj_id, "latest": "true"})

@@ -177,6 +177,40 @@ class TestThrottlerSingleton:
         assert client_after_second._last_call > 0
 
 
+# ── v2 pagination ─────────────────────────────────────────────────────────────
+
+class TestGetItemsPagination:
+    """v2 list endpoints page via next_cursor; _get_items must collect every page."""
+
+    @pytest.mark.asyncio
+    async def test_follows_next_cursor_until_empty(self):
+        from app.services import sec_api
+        pages = [
+            {"message": "success", "next_cursor": "c1", "items": [{"n": 1}, {"n": 2}]},
+            {"message": "success", "next_cursor": "", "items": [{"n": 3}]},
+        ]
+        fake_client = MagicMock()
+        fake_client.get = AsyncMock(side_effect=pages)
+        with patch("app.services.sec_api._client_for", return_value=fake_client):
+            items = await sec_api._get_items("key", "/daily-info/nav", {"proj_id": "P001"})
+
+        assert [i["n"] for i in items] == [1, 2, 3]
+        first_params = fake_client.get.call_args_list[0].kwargs["params"]
+        second_params = fake_client.get.call_args_list[1].kwargs["params"]
+        assert first_params["proj_id"] == "P001"
+        assert "next_cursor" not in first_params
+        assert second_params["next_cursor"] == "c1"
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_list_on_204(self):
+        from app.services import sec_api
+        fake_client = MagicMock()
+        fake_client.get = AsyncMock(return_value=None)
+        with patch("app.services.sec_api._client_for", return_value=fake_client):
+            items = await sec_api.get_dividends("key", "P001")
+        assert items == []
+
+
 # ── stale sync_jobs cleanup ───────────────────────────────────────────────────
 
 class TestCleanupStaleRunningJobs:
@@ -330,7 +364,6 @@ class TestSyncFundMetadata:
         with (
             patch("app.services.sync_service.settings") as mock_settings,
             patch("app.services.sec_api.list_amcs", new_callable=AsyncMock, return_value=amcs),
-            patch("app.services.sec_api.list_factsheet_amcs", new_callable=AsyncMock, return_value=[]),
             patch("app.services.sec_api.get_fund_policy", new_callable=AsyncMock, return_value=None),
             patch("app.services.sec_api.get_fund_performance", new_callable=AsyncMock, return_value=[]),
             patch("app.services.sec_api.list_amc_funds", side_effect=fake_list_amc_funds),
@@ -350,7 +383,6 @@ class TestSyncFundMetadata:
         with (
             patch("app.services.sync_service.settings") as mock_settings,
             patch("app.services.sec_api.list_amcs", new_callable=AsyncMock, return_value=amcs),
-            patch("app.services.sec_api.list_factsheet_amcs", new_callable=AsyncMock, return_value=[]),
             patch("app.services.sec_api.get_fund_policy", new_callable=AsyncMock, return_value=None),
             patch("app.services.sec_api.get_fund_performance", new_callable=AsyncMock, return_value=[]),
             patch("app.services.sec_api.list_amc_funds", new_callable=AsyncMock, return_value=funds),
@@ -365,6 +397,44 @@ class TestSyncFundMetadata:
         assert job.completed_at is not None
 
 
+class TestV2MetadataMapping:
+
+    @pytest.mark.asyncio
+    async def test_maps_v2_status_words_and_amc_name(self, db):
+        amcs = [{"unique_id": "C0000000021", "comp_name_en": "KASIKORN ASSET MANAGEMENT COMPANY LIMITED "}]
+        funds = [
+            {"proj_id": "P001", "proj_abbr_name": "K-FEQ", "fund_status": "Registered"},
+            {"proj_id": "P002", "proj_abbr_name": "K-OLD", "fund_status": "Liquidated"},
+            {"proj_id": "P003", "proj_abbr_name": "K-NEW", "fund_status": "IPO"},
+        ]
+        with (
+            patch("app.services.sync_service.settings") as mock_settings,
+            patch("app.services.sec_api.list_amcs", new_callable=AsyncMock, return_value=amcs),
+            patch("app.services.sec_api.list_amc_funds", new_callable=AsyncMock, return_value=funds),
+            patch("app.services.sec_api.get_fund_policy", new_callable=AsyncMock, return_value=None),
+            patch("app.services.sec_api.get_fund_performance", new_callable=AsyncMock, return_value=[]),
+        ):
+            mock_settings.factsheet_key = "fake-key"
+            mock_settings.SEC_API_KEY = "fake-key"
+            await sync_service.sync_fund_metadata(db)
+
+        assert (await db.get(Fund, "K-FEQ")).fund_status == "RG"
+        assert (await db.get(Fund, "K-OLD")).fund_status == "LI"
+        assert (await db.get(Fund, "K-NEW")).fund_status == "SE"
+        assert (await db.get(Fund, "K-FEQ")).amc == "KASIKORN ASSET MANAGEMENT COMPANY LIMITED"
+
+    def test_volatility_ignores_benchmark_rows(self):
+        rows = [
+            {"fund_class_name": "main", "performance_type_desc": "ความผันผวนของตัวชี้วัด",
+             "reference_period": "1 year", "performance_value": "40.0", "start_date": "2026-08-31"},
+            {"fund_class_name": "main", "performance_type_desc": "ความผันผวนของกองทุนรวม",
+             "reference_period": "1 year", "performance_value": "14.09", "start_date": "2026-08-31"},
+            {"fund_class_name": "main", "performance_type_desc": "ความผันผวนของกองทุนรวม",
+             "reference_period": "3 years", "performance_value": "30.0", "start_date": "2026-08-31"},
+        ]
+        assert sync_service._latest_volatility_by_class(rows) == {"main": 14.09}
+
+
 # ── sync_nav_for_date ──────────────────────────────────────────────────────────
 
 class TestSyncNavForDate:
@@ -372,9 +442,10 @@ class TestSyncNavForDate:
     @pytest.mark.asyncio
     async def test_upserts_nav_history(self, db):
         await _seed_fund(db, "SCBSET", "P001")
+        db.add(NavHistory(fund_code="SCBSET", trade_date=date(2026, 1, 14), nav=Decimal("12.1000")))
         await db.commit()
 
-        nav_payload = {"last_val": "12.3456", "previous_val": "12.1000"}
+        nav_payload = [{"fund_class_name": "main", "nav_date": "2026-01-15", "last_val": 12.3456}]
         nav_date = date(2026, 1, 15)
 
         with (
@@ -397,7 +468,7 @@ class TestSyncNavForDate:
         db.add(NavHistory(fund_code="SCBSET", trade_date=nav_date, nav=Decimal("12.0000"), change_pct=None))
         await db.commit()
 
-        nav_payload = {"last_val": "12.5000", "previous_val": "12.0000"}
+        nav_payload = [{"fund_class_name": "main", "nav_date": "2026-01-15", "last_val": 12.5}]
 
         with (
             patch("app.services.sync_service.settings") as mock_settings,
@@ -443,10 +514,14 @@ class TestSyncNavForDate:
     @pytest.mark.asyncio
     async def test_computes_change_pct_correctly(self, db):
         await _seed_fund(db, "SCBSET", "P001")
+        # Previous trading day is the latest stored NAV before the sync date;
+        # an older row must not be used.
+        db.add(NavHistory(fund_code="SCBSET", trade_date=date(2026, 1, 9), nav=Decimal("8.0000")))
+        db.add(NavHistory(fund_code="SCBSET", trade_date=date(2026, 1, 14), nav=Decimal("10.0000")))
         await db.commit()
 
-        # 12.5 → 12.5 * (1 + change) = new, change = (12.5 - 10.0) / 10.0 = 25%
-        nav_payload = {"last_val": "12.5000", "previous_val": "10.0000"}
+        # change = (12.5 - 10.0) / 10.0 = 25%
+        nav_payload = [{"fund_class_name": "main", "nav_date": "2026-01-15", "last_val": 12.5}]
 
         with (
             patch("app.services.sync_service.settings") as mock_settings,
@@ -473,7 +548,7 @@ class TestSyncNavForDate:
         await db.commit()
 
         nav_date = date(2026, 1, 15)
-        nav_payload = {"last_val": "12.0000", "previous_val": "11.9000"}
+        nav_payload = [{"fund_class_name": "main", "nav_date": "2026-01-15", "last_val": 12.0}]
 
         with (
             patch("app.services.sync_service.settings") as mock_settings,
@@ -485,6 +560,46 @@ class TestSyncNavForDate:
         fund = await db.get(Fund, "SCBSET")
         assert fund.last_nav_date == nav_date
 
+
+    @pytest.mark.asyncio
+    async def test_multi_class_items_map_to_class_fund_codes(self, db):
+        await _seed_fund(db, "KKP DIVIDEND", "P001")
+        await db.commit()
+
+        nav_date = date(2026, 10, 14)
+        nav_payload = [
+            {"fund_class_name": "KKP DIVIDEND", "nav_date": "2026-10-14", "last_val": 14.1145},
+            {"fund_class_name": "KKP DIVIDEND-SSF", "nav_date": "2026-10-14", "last_val": 14.1151},
+        ]
+        with (
+            patch("app.services.sync_service.settings") as mock_settings,
+            patch("app.services.sec_api.get_daily_nav", new_callable=AsyncMock, return_value=nav_payload),
+        ):
+            mock_settings.SEC_API_KEY = "fake-key"
+            result = await sync_service.sync_nav_for_date(db, nav_date)
+
+        assert result["synced"] == 2
+        assert (await db.get(NavHistory, ("KKP DIVIDEND", nav_date))).nav == Decimal("14.1145")
+        assert (await db.get(NavHistory, ("KKP DIVIDEND-SSF", nav_date))).nav == Decimal("14.1151")
+        ssf = await db.get(Fund, "KKP DIVIDEND-SSF")
+        assert ssf is not None and ssf.sec_proj_id == "P001"
+
+    @pytest.mark.asyncio
+    async def test_change_pct_is_none_without_previous_nav(self, db):
+        await _seed_fund(db, "SCBSET", "P001")
+        await db.commit()
+
+        nav_payload = [{"fund_class_name": "main", "nav_date": "2026-01-15", "last_val": 12.0}]
+        with (
+            patch("app.services.sync_service.settings") as mock_settings,
+            patch("app.services.sec_api.get_daily_nav", new_callable=AsyncMock, return_value=nav_payload),
+        ):
+            mock_settings.SEC_API_KEY = "fake-key"
+            await sync_service.sync_nav_for_date(db, date(2026, 1, 15))
+
+        row = await db.get(NavHistory, ("SCBSET", date(2026, 1, 15)))
+        assert row.nav == Decimal("12.0")
+        assert row.change_pct is None
 
 # ── sync_dividends ─────────────────────────────────────────────────────────────
 
