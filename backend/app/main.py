@@ -14,7 +14,7 @@ from app.api import sync as sync_router_module
 from app.api import analytics as analytics_router_module
 from app.database import AsyncSessionLocal
 from app.models.fund import Fund, NavHistory
-from app.services import sync_service
+from app.services import fund_category_service, sync_service
 from app.services.clock import today_ict
 from app.services.portfolio_service import clear_all_cache
 
@@ -90,6 +90,8 @@ async def _weekly_metadata_sync():
         try:
             result = await sync_service.sync_fund_metadata(db)
             logger.info("Scheduled metadata sync: %s", result)
+            result = await fund_category_service.categorize_funds(db)
+            logger.info("Scheduled fund categorisation: %s", result)
             clear_all_cache()
         except Exception:
             logger.exception("Scheduled metadata sync failed")

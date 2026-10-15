@@ -2,7 +2,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Date, DateTime, Integer, JSON, Numeric, String, Uuid, func
+from sqlalchemy import Date, DateTime, Integer, JSON, Numeric, String, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -20,12 +20,28 @@ class Fund(Base):
     amc_unique_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     asset_class: Mapped[str | None] = mapped_column(String(100), nullable=True)
     risk_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    benchmark: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    benchmark: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     fund_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
     fund_status: Mapped[str | None] = mapped_column(String(10), nullable=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_nav_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     raw_factsheet: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # Category: region/theme come from the local LLM (category_source="ai") or an
+    # admin override ("manual", never overwritten by sync). See fund_category_service.
+    region: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    theme: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    category_source: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    category_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category_input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    categorized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Verbatim SEC v2 fields
+    management_style: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    master_fund: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    fx_hedge: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    sec_risk_spectrum: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    top_holdings: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class NavHistory(Base):

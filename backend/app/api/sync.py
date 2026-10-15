@@ -16,6 +16,7 @@ from app.schemas.fund import SyncJobOut
 from app.api.deps import require_admin
 from app.services import sync_service
 from app.services import finnomena_service
+from app.services import fund_category_service
 from app.services.sec_api import SecApiUnauthorizedError
 from app.services.portfolio_service import clear_all_cache
 
@@ -29,6 +30,15 @@ async def _run_fund_sync():
             await sync_service.sync_fund_metadata(db)
         except Exception:
             logger.exception("Background fund metadata sync failed")
+
+
+async def _run_categorize(force: bool):
+    async with AsyncSessionLocal() as db:
+        try:
+            await fund_category_service.categorize_funds(db, force=force)
+            clear_all_cache()
+        except Exception:
+            logger.exception("Background fund categorisation failed")
 
 
 async def _run_nav_sync(nav_date: date):
@@ -141,6 +151,18 @@ async def trigger_dividend_sync(
     """Trigger dividend sync asynchronously. Returns immediately."""
     background_tasks.add_task(_run_dividend_sync)
     return {"status": "started", "message": "Dividend sync running in background"}
+
+
+@router.post("/categories")
+async def trigger_fund_categorisation(
+    background_tasks: BackgroundTasks,
+    force: bool = False,
+    _=Depends(require_admin),
+):
+    """Refresh SEC classification fields + region/theme (local LLM) for portfolio funds.
+    force=True re-classifies even when the SEC inputs are unchanged."""
+    background_tasks.add_task(_run_categorize, force)
+    return {"status": "started", "message": "Fund categorisation running in background"}
 
 
 @router.get("/jobs", response_model=list[SyncJobOut])

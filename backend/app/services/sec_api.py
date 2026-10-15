@@ -179,3 +179,26 @@ async def get_fund_performance(key: str, proj_id: str) -> list[dict]:
     reference_period, performance_value, start_date.
     """
     return await _get_items(key, "/factsheet/performance", {"proj_id": proj_id, "latest": "true"})
+
+
+async def get_fund_profiles(key: str, proj_id: str) -> list[dict]:
+    """GET /general-info/profiles for one fund → one row per share class
+    (fund_class_name, management_style, feederfund_master_fund,
+    exchange_rate_protection_policy, investment_policy_desc, ...)."""
+    items = await _get_items(key, "/general-info/profiles", {"project_info": proj_id})
+    return [i for i in items if i.get("proj_id") == proj_id]
+
+
+async def get_benchmarks(key: str, proj_id: str) -> list[dict]:
+    """GET /factsheet/benchmarks (latest factsheet) → rows with benchmark, group_seq."""
+    return await _get_items(key, "/factsheet/benchmarks", {"proj_id": proj_id, "latest": "true"})
+
+
+async def get_top5_holdings(key: str, proj_id: str) -> list[dict]:
+    """GET /factsheet/top5-holdings (latest factsheet)."""
+    return await _get_items(key, "/factsheet/top5-holdings", {"proj_id": proj_id, "latest": "true"})
+
+
+async def get_risk_spectrum(key: str, proj_id: str) -> list[dict]:
+    """GET /factsheet/risk-spectrum (latest factsheet) → rows with risk_spectrum e.g. "RS6"."""
+    return await _get_items(key, "/factsheet/risk-spectrum", {"proj_id": proj_id, "latest": "true"})

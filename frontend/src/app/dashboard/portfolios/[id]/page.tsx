@@ -10,6 +10,7 @@ import {
   api,
   type Transaction, type TransactionCreate, type Portfolio,
   type PortfolioSummary, type HoldingRow, type AllocationResult, type LotEligibility,
+  type FundDetail, type CategoryOptions,
   type FundPerformance, type FundRiskMetrics, type FundResult, type NavPoint, type AiSummary,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -498,6 +499,102 @@ function DividendSummarySection({ holdings }: { holdings: HoldingRow[] }) {
 
 // ── Holdings table ─────────────────────────────────────────────────────────────
 
+const MANAGEMENT_STYLE: Record<string, string> = {
+  AM: "Active", AN: "Feeder (active master)", PM: "Passive / index", PN: "Feeder (passive master)",
+  IM: "Inverse", IN: "Feeder (inverse master)", LM: "Leveraged", LN: "Feeder (leveraged master)",
+  BH: "Buy-and-hold", SM: "Index + alpha", OT: "Other",
+};
+
+function FundCategoryPanel({ fundCode, onChanged }: { fundCode: string; onChanged: () => void }) {
+  const [fund, setFund] = useState<FundDetail | null>(null);
+  const [options, setOptions] = useState<CategoryOptions | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [region, setRegion] = useState("");
+  const [theme, setTheme] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    api.getFund(fundCode).then(setFund).catch(() => setFund(null));
+    api.getMe().then((u) => setIsAdmin(u.role === "admin")).catch(() => {});
+  }, [fundCode]);
+
+  function startEdit() {
+    setRegion(fund?.region ?? "");
+    setTheme(fund?.theme ?? "");
+    setError("");
+    setEditing(true);
+    if (!options) api.getCategoryOptions().then(setOptions).catch(() => setError("Could not load options"));
+  }
+
+  async function save(body: { region?: string; theme?: string; category_source?: "ai" }) {
+    setSaving(true);
+    setError("");
+    try {
+      setFund(await api.updateFundCategory(fundCode, body));
+      setEditing(false);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!fund) return null;
+  const style = fund.management_style ? MANAGEMENT_STYLE[fund.management_style] ?? fund.management_style : null;
+  const selectCls = "h-8 rounded-md border bg-background px-2 text-xs";
+
+  return (
+    <div className="mb-3 rounded-md border bg-background/60 p-3 text-xs space-y-1.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium">{fund.category_label ?? "Not categorized yet"}</span>
+        {fund.category_source && (
+          <Badge variant="outline" className="text-[10px]">{fund.category_source === "manual" ? "Manual" : "AI"}</Badge>
+        )}
+        {isAdmin && !editing && (
+          <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={startEdit}>Edit</Button>
+        )}
+      </div>
+      {editing && (
+        <div className="flex flex-wrap items-center gap-2">
+          <select className={selectCls} value={theme} onChange={(e) => setTheme(e.target.value)} aria-label="Theme">
+            <option value="" disabled>Theme…</option>
+            {options?.themes.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+          <select className={selectCls} value={region} onChange={(e) => setRegion(e.target.value)} aria-label="Region">
+            <option value="" disabled>Region…</option>
+            {options?.regions.map((r) => <option key={r} value={r}>{r}</option>)}
+          </select>
+          <Button size="sm" className="h-8 text-xs" disabled={saving || !region || !theme} onClick={() => save({ region, theme })}>Save</Button>
+          {fund.category_source === "manual" && (
+            <Button variant="outline" size="sm" className="h-8 text-xs" disabled={saving}
+              onClick={() => save({ category_source: "ai" })}>Reset to AI</Button>
+          )}
+          <Button variant="ghost" size="sm" className="h-8 text-xs" disabled={saving} onClick={() => setEditing(false)}>Cancel</Button>
+          {error && <span className="text-red-600 dark:text-red-400">{error}</span>}
+        </div>
+      )}
+      {fund.category_reason && <p className="text-muted-foreground">{fund.category_reason}</p>}
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
+        {style && <span>Style: <span className="text-foreground">{style}</span></span>}
+        {fund.master_fund && <span>Master fund: <span className="text-foreground">{fund.master_fund}</span></span>}
+        {fund.fx_hedge && <span>FX hedge: <span className="text-foreground">{fund.fx_hedge}</span></span>}
+        {fund.sec_risk_spectrum && <span>SEC risk: <span className="text-foreground">RS{fund.sec_risk_spectrum}</span></span>}
+      </div>
+      {fund.top_holdings && fund.top_holdings.length > 0 && (
+        <div className="text-muted-foreground">
+          Top holdings:{" "}
+          <span className="text-foreground">
+            {fund.top_holdings.map((t) => `${t.name}${t.pct != null ? ` ${t.pct}%` : ""}`).join(" · ")}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 type HoldingSortKey = "fund_code" | "tax_scheme" | "units" | "market_value" | "unrealized_pnl" | "unrealized_pnl_pct" | "fund_pnl_pct" | "total_return_pct" | "total_return_fund_pct" | "oldest_purchase_date" | "holding_days";
 
 function HoldingsSection({
@@ -638,6 +735,7 @@ function HoldingsSection({
                       <div>
                         <div className="font-mono text-xs font-medium">{h.fund_code}</div>
                         {h.fund_name_en && <div className="text-xs text-muted-foreground truncate max-w-[140px]">{h.fund_name_en}</div>}
+                        {h.category_label && <div className="text-[11px] text-primary/80 truncate max-w-[160px]">{h.category_label}</div>}
                       </div>
                     </div>
                   </td>
@@ -723,6 +821,7 @@ function HoldingsSection({
                 {expandedFund === `${h.fund_code}:${h.tax_scheme}` && (
                   <tr key={`${i}-chart`} className="border-b bg-muted/20">
                     <td colSpan={otherPortfolios.length > 0 ? 10 : 9} className="px-4 py-3">
+                      <FundCategoryPanel fundCode={h.fund_code} onChanged={onTransferred} />
                       <NavChart fundCode={h.fund_code} entryDate={h.fund_entry_date ?? undefined} />
                     </td>
                   </tr>
@@ -800,6 +899,8 @@ function AllocationSection({ allocation }: { allocation: AllocationResult }) {
       <AllocationChart items={allocation.by_amc.map(i => ({ ...i, label: shortenAmc(i.label) }))} title="By AMC" />
       <AllocationChart items={allocation.by_tax_scheme} title="By Tax Scheme" />
       <AllocationChart items={allocation.by_risk_level} title="By Risk Level" />
+      <AllocationChart items={allocation.by_region ?? []} title="By Region" />
+      <AllocationChart items={allocation.by_theme ?? []} title="By Theme" />
     </div>
   );
 }
@@ -1012,6 +1113,8 @@ function FundPerformanceSection({ holdings }: { holdings: HoldingRow[] }) {
   const fundCodes = Array.from(new Set(holdings.map((h) => h.fund_code)));
   const benchmarkMap: Record<string, string | null> = {};
   for (const h of holdings) benchmarkMap[h.fund_code] = h.benchmark ?? null;
+  const categoryMap: Record<string, string | null> = {};
+  for (const h of holdings) categoryMap[h.fund_code] = h.category_label ?? null;
   const [perf, setPerf] = useState<Record<string, FundPerformance>>({});
   const [risk, setRisk] = useState<Record<string, FundRiskMetrics>>({});
   const [loading, setLoading] = useState(true);
@@ -1142,7 +1245,10 @@ function FundPerformanceSection({ holdings }: { holdings: HoldingRow[] }) {
             if (!p) return null;
             return (
               <tr key={code} className="border-b hover:bg-muted/30">
-                <td className="px-2 py-2 font-mono text-xs font-medium">{code}</td>
+                <td className="px-2 py-2 font-mono text-xs font-medium">
+                  {code}
+                  {categoryMap[code] && <div className="font-sans font-normal text-[11px] text-primary/80 whitespace-nowrap">{categoryMap[code]}</div>}
+                </td>
                 <td className="px-2 py-2 text-right tabular-nums text-xs">
                   {p.latest_nav ? `฿${Number(p.latest_nav).toFixed(4)}` : "–"}
                   {p.latest_nav_date && <div className="text-muted-foreground">{p.latest_nav_date}</div>}

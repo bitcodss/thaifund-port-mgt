@@ -11,6 +11,9 @@ class HoldingRow(BaseModel):
     amc: str | None
     asset_class: str | None
     benchmark: str | None = None
+    region: str | None = None
+    theme: str | None = None
+    category_label: str | None = None
     tax_scheme: str
     units: Decimal
     cost_basis: Decimal
@@ -59,6 +62,8 @@ class AllocationResult(BaseModel):
     by_amc: list[AllocationItem]
     by_tax_scheme: list[AllocationItem]
     by_risk_level: list[AllocationItem]
+    by_region: list[AllocationItem] = []
+    by_theme: list[AllocationItem] = []
 
 
 class FundPerformance(BaseModel):

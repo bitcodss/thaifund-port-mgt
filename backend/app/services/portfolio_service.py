@@ -22,6 +22,7 @@ from app.schemas.analytics import (
     AllocationItem, AllocationResult, HoldingRow, LotEligibility, PortfolioSummary,
 )
 from app.services.clock import today_ict
+from app.services.fund_taxonomy import category_label
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +226,9 @@ async def get_holdings(portfolio_id: UUID, db: AsyncSession) -> list[HoldingRow]
             amc=fund.amc if fund else None,
             asset_class=fund.asset_class if fund else None,
             benchmark=fund.benchmark if fund else None,
+            region=fund.region if fund else None,
+            theme=fund.theme if fund else None,
+            category_label=category_label(fund.theme, fund.region, fund.asset_class) if fund else None,
             tax_scheme=row.tax_scheme,
             units=units,
             cost_basis=cost,
@@ -615,6 +619,8 @@ async def get_allocation(portfolio_id: UUID, db: AsyncSession) -> AllocationResu
         by_amc=group(lambda h: h.amc),
         by_tax_scheme=group(lambda h: h.tax_scheme),
         by_risk_level=group(risk_label),
+        by_region=group(lambda h: h.region),
+        by_theme=group(lambda h: h.theme),
     )
     _cache_set(key, result)
     return result

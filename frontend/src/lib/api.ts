@@ -70,6 +70,8 @@ export const api = {
     return request<{ status: string; message: string }>("POST", `/sync/nav/backfill?${params}`);
   },
   syncDividends: () => request<{ status: string; message: string }>("POST", "/sync/dividends"),
+  syncCategories: (force?: boolean) =>
+    request<{ status: string; message: string }>("POST", `/sync/categories${force ? "?force=true" : ""}`),
   syncFinnomenaNav: () => request<{ status: string; message: string }>("POST", "/sync/finnomena-nav"),
   listSyncJobs: () => request<SyncJob[]>("GET", "/sync/jobs"),
   searchFunds: (q: string) => request<FundResult[]>("GET", `/funds/search?q=${encodeURIComponent(q)}`),
@@ -117,6 +119,11 @@ export const api = {
     request<LotEligibility[]>("GET", `/portfolios/${portfolioId}/analytics/tax-eligibility`),
   getFundPerformance: (fundCode: string, sinceDate?: string) =>
     request<FundPerformance>("GET", `/funds/${fundCode}/performance${sinceDate ? `?since_date=${sinceDate}` : ""}`),
+  getFund: (fundCode: string) => request<FundDetail>("GET", `/funds/${encodeURIComponent(fundCode)}`),
+  getCategoryOptions: () => request<CategoryOptions>("GET", "/funds/category-options"),
+  // Admin: manual category override, or { category_source: "ai" } to hand back to the classifier
+  updateFundCategory: (fundCode: string, body: { region?: string; theme?: string; category_source?: "ai" }) =>
+    request<FundDetail>("PATCH", `/funds/${encodeURIComponent(fundCode)}`, body),
   getFundRiskMetrics: (fundCode: string) =>
     request<FundRiskMetrics>("GET", `/funds/${fundCode}/risk-metrics`),
   getFundNavHistory: (fundCode: string, days = 365) =>
@@ -258,6 +265,9 @@ export interface HoldingRow {
   amc: string | null;
   asset_class: string | null;
   benchmark: string | null;
+  region: string | null;
+  theme: string | null;
+  category_label: string | null;
   tax_scheme: string;
   units: string;
   cost_basis: string;
@@ -288,6 +298,33 @@ export interface AllocationResult {
   by_amc: AllocationItem[];
   by_tax_scheme: AllocationItem[];
   by_risk_level: AllocationItem[];
+  by_region: AllocationItem[];
+  by_theme: AllocationItem[];
+}
+
+export interface FundDetail {
+  fund_code: string;
+  sec_proj_id: string | null;
+  name_en: string | null;
+  name_th: string | null;
+  amc: string | null;
+  asset_class: string | null;
+  benchmark: string | null;
+  region: string | null;
+  theme: string | null;
+  category_label: string | null;
+  category_source: "ai" | "manual" | null;
+  category_reason: string | null;
+  management_style: string | null;
+  master_fund: string | null;
+  fx_hedge: string | null;
+  sec_risk_spectrum: number | null;
+  top_holdings: { name: string; pct: number | null }[] | null;
+}
+
+export interface CategoryOptions {
+  regions: string[];
+  themes: string[];
 }
 
 export interface FundPerformance {

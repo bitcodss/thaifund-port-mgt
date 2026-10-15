@@ -9,8 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.fund import Fund, NavHistory
-from app.schemas.fund import FundCreate, FundUpdate, FundOut, NavHistoryOut
+from app.schemas.fund import CategoryOptions, FundCreate, FundUpdate, FundOut, NavHistoryOut
+from app.services.fund_taxonomy import REGIONS, THEMES
 from app.api.deps import get_current_user, require_admin
+from app.services.portfolio_service import clear_all_cache
 
 router = APIRouter(prefix="/funds", tags=["funds"])
 
@@ -60,6 +62,12 @@ async def create_fund(
     return fund
 
 
+@router.get("/category-options", response_model=CategoryOptions)
+async def get_category_options(_=Depends(get_current_user)):
+    """Allowed region/theme values for the category override picker."""
+    return CategoryOptions(regions=REGIONS, themes=THEMES)
+
+
 @router.get("/{fund_code}", response_model=FundOut)
 async def get_fund(
     fund_code: str,
@@ -82,9 +90,18 @@ async def update_fund(
     fund = await db.get(Fund, fund_code.upper())
     if not fund:
         raise HTTPException(status_code=404, detail="Fund not found")
-    for field, value in body.model_dump(exclude_none=True).items():
+    updates = body.model_dump(exclude_none=True)
+    if updates.pop("category_source", None) == "ai":
+        # Hand back to the classifier: next categorisation run re-classifies it
+        fund.category_source = "ai"
+        fund.category_input_hash = None
+    if "region" in updates or "theme" in updates:
+        updates["category_source"] = "manual"
+        updates["category_reason"] = "Set manually by admin"
+    for field, value in updates.items():
         setattr(fund, field, value)
     await db.commit()
+    clear_all_cache()  # holdings/allocation embed fund metadata
     await db.refresh(fund)
     return fund
 
