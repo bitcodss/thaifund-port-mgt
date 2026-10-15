@@ -16,7 +16,7 @@ from app.schemas.fund import SyncJobOut
 from app.api.deps import require_admin
 from app.services import sync_service
 from app.services import finnomena_service
-from app.services import fund_category_service
+from app.services import fund_category_service, news_service, proxy_service
 from app.services.sec_api import SecApiUnauthorizedError
 from app.services.portfolio_service import clear_all_cache
 
@@ -39,6 +39,30 @@ async def _run_categorize(force: bool):
             clear_all_cache()
         except Exception:
             logger.exception("Background fund categorisation failed")
+
+
+async def _run_proxies(force: bool):
+    async with AsyncSessionLocal() as db:
+        try:
+            await proxy_service.refresh_proxies(db, force=force)
+        except Exception:
+            logger.exception("Background proxy refresh failed")
+
+
+async def _run_news_collect():
+    async with AsyncSessionLocal() as db:
+        try:
+            await news_service.collect_news(db)
+        except Exception:
+            logger.exception("Background news collection failed")
+
+
+async def _run_digests(week_start: date | None, force: bool):
+    async with AsyncSessionLocal() as db:
+        try:
+            await news_service.build_digests(db, week_start=week_start, force=force)
+        except Exception:
+            logger.exception("Background news digests failed")
 
 
 async def _run_nav_sync(nav_date: date):
@@ -163,6 +187,33 @@ async def trigger_fund_categorisation(
     force=True re-classifies even when the SEC inputs are unchanged."""
     background_tasks.add_task(_run_categorize, force)
     return {"status": "started", "message": "Fund categorisation running in background"}
+
+
+@router.post("/proxies")
+async def trigger_proxy_refresh(background_tasks: BackgroundTasks, force: bool = False, _=Depends(require_admin)):
+    """Suggest + validate price/news proxy tickers for portfolio funds (manual overrides kept)."""
+    background_tasks.add_task(_run_proxies, force)
+    return {"status": "started", "message": "Proxy refresh running in background"}
+
+
+@router.post("/news")
+async def trigger_news_collect(background_tasks: BackgroundTasks, _=Depends(require_admin)):
+    background_tasks.add_task(_run_news_collect)
+    return {"status": "started", "message": "News collection running in background"}
+
+
+@router.post("/news/digests")
+async def trigger_news_digests(
+    background_tasks: BackgroundTasks,
+    week_start: date | None = None,
+    force: bool = False,
+    _=Depends(require_admin),
+):
+    """Build weekly digests (default: last complete Mon–Sun week, Asia/Bangkok)."""
+    if week_start is not None and week_start.weekday() != 0:
+        raise HTTPException(status_code=400, detail="week_start must be a Monday")
+    background_tasks.add_task(_run_digests, week_start, force)
+    return {"status": "started", "message": "News digests running in background"}
 
 
 @router.get("/jobs", response_model=list[SyncJobOut])

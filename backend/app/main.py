@@ -14,7 +14,7 @@ from app.api import sync as sync_router_module
 from app.api import analytics as analytics_router_module
 from app.database import AsyncSessionLocal
 from app.models.fund import Fund, NavHistory
-from app.services import fund_category_service, sync_service
+from app.services import fund_category_service, news_service, proxy_service, sync_service
 from app.services.clock import today_ict
 from app.services.portfolio_service import clear_all_cache
 
@@ -92,9 +92,30 @@ async def _daily_metadata_sync():
             logger.info("Scheduled metadata sync: %s", result)
             result = await fund_category_service.categorize_funds(db)
             logger.info("Scheduled fund categorisation: %s", result)
+            result = await proxy_service.refresh_proxies(db)
+            logger.info("Scheduled proxy refresh: %s", result)
             clear_all_cache()
         except Exception:
             logger.exception("Scheduled metadata sync failed")
+
+
+async def _collect_news():
+    """Every 2h: Yahoo RSS keeps only the latest ~20 items per ticker."""
+    async with AsyncSessionLocal() as db:
+        try:
+            await news_service.collect_news(db)
+        except Exception:
+            logger.exception("Scheduled news collection failed")
+
+
+async def _weekly_news_digests():
+    """Monday 06:00 ICT: digests for the week that just ended."""
+    async with AsyncSessionLocal() as db:
+        try:
+            result = await news_service.build_digests(db)
+            logger.info("Scheduled news digests: %s", result)
+        except Exception:
+            logger.exception("Scheduled news digests failed")
 
 
 async def _daily_dividend_sync():
@@ -130,6 +151,8 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_run_nav_catchup, CronTrigger(day_of_week="tue-sat", hour=2, minute=0))
     scheduler.add_job(_daily_metadata_sync, CronTrigger(hour=0, minute=0, timezone="Asia/Bangkok"))
     scheduler.add_job(_daily_dividend_sync, CronTrigger(hour=13, minute=30))
+    scheduler.add_job(_collect_news, CronTrigger(hour="*/2", minute=10, timezone="Asia/Bangkok"))
+    scheduler.add_job(_weekly_news_digests, CronTrigger(day_of_week="mon", hour=6, minute=0, timezone="Asia/Bangkok"))
     scheduler.start()
     yield
     scheduler.shutdown()

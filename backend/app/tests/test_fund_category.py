@@ -320,20 +320,27 @@ class TestCategorizeIfNew:
     @pytest.mark.asyncio
     async def test_only_uncategorised_sec_funds_are_classified(self, factory):
         run = AsyncMock(return_value={"classified": 1, "unchanged": 0, "errors": []})
-        with patch("app.services.fund_category_service.categorize_funds", new=run):
+        proxies = AsyncMock(return_value={"updated": 1, "unchanged": 0, "errors": []})
+        with patch("app.services.fund_category_service.categorize_funds", new=run), \
+                patch("app.services.proxy_service.refresh_proxies", new=proxies):
             await fcs.categorize_if_new(
                 ["NEW-SSF", "DONE-SSF", "MANUAL-SSF", "NOPROJ", "UNKNOWN", None],
                 session_factory=factory,
             )
         run.assert_awaited_once()
         assert run.await_args.kwargs["proj_ids"] == {"P_NEW"}
+        proxies.assert_awaited_once()                    # new fund also gets price/news proxies
+        assert proxies.await_args.kwargs["proj_ids"] == {"P_NEW"}
 
     @pytest.mark.asyncio
     async def test_no_call_when_nothing_new(self, factory):
         run = AsyncMock()
-        with patch("app.services.fund_category_service.categorize_funds", new=run):
+        proxies = AsyncMock()
+        with patch("app.services.fund_category_service.categorize_funds", new=run), \
+                patch("app.services.proxy_service.refresh_proxies", new=proxies):
             await fcs.categorize_if_new(["DONE-SSF", "MANUAL-SSF"], session_factory=factory)
         run.assert_not_awaited()
+        proxies.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_failure_is_swallowed(self, factory):

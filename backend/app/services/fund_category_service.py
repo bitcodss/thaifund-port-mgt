@@ -258,6 +258,8 @@ async def categorize_if_new(fund_codes, session_factory=None) -> None:
             if not proj_ids:
                 return
             await categorize_funds(db, proj_ids=proj_ids)
+            from app.services import proxy_service  # local: proxy_service imports this module's deps
+            await proxy_service.refresh_proxies(db, proj_ids=proj_ids)
         clear_all_cache()
     except Exception:
         logger.exception("Auto-categorisation failed for %s", sorted(codes))

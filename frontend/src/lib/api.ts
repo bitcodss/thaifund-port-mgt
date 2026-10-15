@@ -114,6 +114,8 @@ export const api = {
     request<FundPerformance>("GET", `/funds/${fundCode}/performance${sinceDate ? `?since_date=${sinceDate}` : ""}`),
   getFund: (fundCode: string) => request<FundDetail>("GET", `/funds/${encodeURIComponent(fundCode)}`),
   getCategoryOptions: () => request<CategoryOptions>("GET", "/funds/category-options"),
+  getFundProxies: (fundCode: string) =>
+    request<FundProxy[]>("GET", `/funds/${encodeURIComponent(fundCode)}/proxies`),
   // Admin: manual category override, or { category_source: "ai" } to hand back to the classifier
   updateFundCategory: (fundCode: string, body: { region?: string; theme?: string; category_source?: "ai" }) =>
     request<FundDetail>("PATCH", `/funds/${encodeURIComponent(fundCode)}`, body),
@@ -313,6 +315,20 @@ export interface FundDetail {
   fx_hedge: string | null;
   sec_risk_spectrum: number | null;
   top_holdings: { name: string; pct: number | null }[] | null;
+}
+
+export interface FundProxy {
+  kind: "price" | "news";
+  ticker: string;
+  label: string | null;
+  source: "holding" | "factsheet" | "ai" | "manual";
+  reason: string | null;
+  valid: boolean;
+  verified: boolean;   // false = LLM fallback, not from real holdings
+  override_stale: boolean;   // manual override with source data > 90 days old
+  source_note: string | null;
+  source_as_of: string | null;
+  history_days: number | null;
 }
 
 export interface CategoryOptions {

@@ -202,3 +202,8 @@ async def get_top5_holdings(key: str, proj_id: str) -> list[dict]:
 async def get_risk_spectrum(key: str, proj_id: str) -> list[dict]:
     """GET /factsheet/risk-spectrum (latest factsheet) → rows with risk_spectrum e.g. "RS6"."""
     return await _get_items(key, "/factsheet/risk-spectrum", {"proj_id": proj_id, "latest": "true"})
+
+
+async def get_factsheet_urls(key: str, proj_id: str) -> list[dict]:
+    """GET /factsheet/urls → rows with pdf_factsheet (SEC copy), amc_url_factsheet, as_of_date."""
+    return await _get_items(key, "/factsheet/urls", {"proj_id": proj_id})

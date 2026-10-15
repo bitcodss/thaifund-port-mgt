@@ -10,7 +10,7 @@ import {
   api,
   type Transaction, type TransactionCreate, type Portfolio,
   type PortfolioSummary, type HoldingRow, type AllocationResult, type LotEligibility,
-  type FundDetail, type CategoryOptions,
+  type FundDetail, type CategoryOptions, type FundProxy,
   type FundPerformance, type FundRiskMetrics, type FundResult, type NavPoint, type AiSummary,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -507,6 +507,7 @@ const MANAGEMENT_STYLE: Record<string, string> = {
 
 function FundCategoryPanel({ fundCode, onChanged }: { fundCode: string; onChanged: () => void }) {
   const [fund, setFund] = useState<FundDetail | null>(null);
+  const [newsProxies, setNewsProxies] = useState<FundProxy[]>([]);
   const [options, setOptions] = useState<CategoryOptions | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -517,6 +518,9 @@ function FundCategoryPanel({ fundCode, onChanged }: { fundCode: string; onChange
 
   useEffect(() => {
     api.getFund(fundCode).then(setFund).catch(() => setFund(null));
+    api.getFundProxies(fundCode)
+      .then((ps) => setNewsProxies(ps.filter((p) => p.kind === "news" && p.valid)))
+      .catch(() => setNewsProxies([]));
     api.getMe().then((u) => setIsAdmin(u.role === "admin")).catch(() => {});
   }, [fundCode]);
 
@@ -583,6 +587,34 @@ function FundCategoryPanel({ fundCode, onChanged }: { fundCode: string; onChange
         {fund.fx_hedge && <span>FX hedge: <span className="text-foreground">{fund.fx_hedge}</span></span>}
         {fund.sec_risk_spectrum && <span>SEC risk: <span className="text-foreground">RS{fund.sec_risk_spectrum}</span></span>}
       </div>
+      {newsProxies.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 text-muted-foreground">
+          News sources:
+          {newsProxies.map((p) => (
+            <span key={p.ticker} className="font-mono text-foreground" title={p.reason ?? undefined}>{p.ticker}</span>
+          ))}
+          {newsProxies.some((p) => !p.verified) && (
+            <Badge variant="warning" className="text-[10px]"
+              title="Suggested by the AI because the fund's real holdings couldn't be resolved — review or override">
+              Unverified
+            </Badge>
+          )}
+          {newsProxies.some((p) => p.source === "manual") && (() => {
+            const o = newsProxies.find((p) => p.source === "manual")!;
+            return (
+              <span className="text-[11px]">
+                (override{o.source_note ? `: ${o.source_note}` : ""}{o.source_as_of ? `, as of ${o.source_as_of}` : ""})
+              </span>
+            );
+          })()}
+          {isAdmin && newsProxies.some((p) => p.override_stale) && (
+            <Badge variant="warning" className="text-[10px]"
+              title="Override source data is over 3 months old and sync never replaces overrides — re-check the holdings">
+              Override &gt; 3 months old
+            </Badge>
+          )}
+        </div>
+      )}
       {fund.top_holdings && fund.top_holdings.length > 0 && (
         <div className="text-muted-foreground">
           Top holdings:{" "}

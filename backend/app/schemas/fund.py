@@ -113,3 +113,53 @@ class SyncJobOut(BaseModel):
     error_message: str | None
 
     model_config = {"from_attributes": True}
+
+
+class FundProxyOut(BaseModel):
+    kind: str
+    ticker: str
+    label: str | None
+    source: str
+    reason: str | None
+    valid: bool
+    history_days: int | None
+    validated_at: datetime | None
+    source_note: str | None = None
+    source_as_of: date | None = None
+    created_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+    @computed_field
+    @property
+    def verified(self) -> bool:
+        """False for LLM-suggested fallbacks: not derived from real holdings or an admin."""
+        return self.source != "ai"
+
+    @computed_field
+    @property
+    def override_stale(self) -> bool:
+        """Manual override whose source data is over 90 days old (holdings may have drifted)."""
+        if self.source != "manual":
+            return False
+        ref = self.source_as_of or (self.created_at.date() if self.created_at else None)
+        return ref is not None and (date.today() - ref).days > 90
+
+
+class FundProxyUpdate(BaseModel):
+    tickers: list[str]   # empty → remove the manual override; sync re-suggests
+    source_note: str | None = None     # e.g. "Master fund factsheet (Baillie Gifford)"
+    source_as_of: date | None = None   # date of that source data
+
+
+class NewsDigestOut(BaseModel):
+    ticker: str
+    week_start: date
+    summary: str | None
+    sentiment: str | None
+    item_count: int
+    sources: list[dict] | None
+    status: str
+    error: str | None
+
+    model_config = {"from_attributes": True}

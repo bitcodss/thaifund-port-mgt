@@ -9,7 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.fund import Fund, NavHistory
-from app.schemas.fund import CategoryOptions, FundCreate, FundUpdate, FundOut, NavHistoryOut
+from app.models.market import FundProxy, NewsDigest
+from app.schemas.fund import (
+    CategoryOptions, FundCreate, FundOut, FundProxyOut, FundProxyUpdate, FundUpdate,
+    NavHistoryOut, NewsDigestOut,
+)
+from app.services import proxy_service
 from app.services.fund_taxonomy import REGIONS, THEMES
 from app.api.deps import get_current_user, require_admin
 from app.services.portfolio_service import clear_all_cache
@@ -104,6 +109,64 @@ async def update_fund(
     clear_all_cache()  # holdings/allocation embed fund metadata
     await db.refresh(fund)
     return fund
+
+
+async def _proj_id(fund_code: str, db: AsyncSession) -> str:
+    fund = await db.get(Fund, fund_code.upper())
+    if not fund:
+        raise HTTPException(status_code=404, detail="Fund not found")
+    if not fund.sec_proj_id:
+        raise HTTPException(status_code=400, detail="Fund has no SEC project id")
+    return fund.sec_proj_id
+
+
+@router.get("/{fund_code}/proxies", response_model=list[FundProxyOut])
+async def get_fund_proxies(
+    fund_code: str,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    proj_id = await _proj_id(fund_code, db)
+    rows = await db.execute(
+        select(FundProxy).where(FundProxy.sec_proj_id == proj_id).order_by(FundProxy.kind, FundProxy.ticker)
+    )
+    return rows.scalars().all()
+
+
+@router.put("/{fund_code}/proxies/{kind}", response_model=list[FundProxyOut])
+async def set_fund_proxies(
+    fund_code: str,
+    kind: str,
+    body: FundProxyUpdate,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(require_admin),
+):
+    """Admin override of price or news proxies (validated against Yahoo). Empty list = back to auto."""
+    if kind not in proxy_service.KINDS:
+        raise HTTPException(status_code=422, detail=f"kind must be one of {proxy_service.KINDS}")
+    proj_id = await _proj_id(fund_code, db)
+    return await proxy_service.set_manual(db, proj_id, kind, body.tickers, body.source_note, body.source_as_of)
+
+
+@router.get("/{fund_code}/news-digests", response_model=list[NewsDigestOut])
+async def get_fund_news_digests(
+    fund_code: str,
+    weeks: int = 8,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Weekly digests for this fund's news proxies, newest first."""
+    proj_id = await _proj_id(fund_code, db)
+    tickers = (await db.execute(select(FundProxy.ticker).where(
+        FundProxy.sec_proj_id == proj_id, FundProxy.kind == "news", FundProxy.valid.is_(True)))).scalars().all()
+    if not tickers:
+        return []
+    rows = await db.execute(
+        select(NewsDigest).where(NewsDigest.ticker.in_(tickers))
+        .order_by(NewsDigest.week_start.desc(), NewsDigest.ticker)
+        .limit(max(1, min(weeks, 52)) * len(tickers))
+    )
+    return rows.scalars().all()
 
 
 @router.get("/{fund_code}/nav", response_model=list[NavHistoryOut])
