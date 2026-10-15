@@ -294,3 +294,131 @@ class TestRegionThemeAllocation:
         alloc = await ps.get_allocation(p.id, db)
         assert {i.label: float(i.pct) for i in alloc.by_region} == {"US": 80.0, "Unknown": 20.0}
         assert {i.label: float(i.pct) for i in alloc.by_theme} == {"Broad Market": 60.0, "AI": 20.0, "Unknown": 20.0}
+
+
+# ── auto-categorise newly entered funds ───────────────────────────────────────
+
+class TestCategorizeIfNew:
+
+    @pytest_asyncio.fixture
+    async def factory(self):
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        f = async_sessionmaker(engine, expire_on_commit=False)
+        async with f() as s:
+            s.add_all([
+                Fund(fund_code="NEW-SSF", sec_proj_id="P_NEW"),
+                Fund(fund_code="DONE-SSF", sec_proj_id="P_DONE", region="US", theme="AI", category_source="ai"),
+                Fund(fund_code="MANUAL-SSF", sec_proj_id="P_MAN", category_source="manual"),
+                Fund(fund_code="NOPROJ"),
+            ])
+            await s.commit()
+        yield f
+        await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_only_uncategorised_sec_funds_are_classified(self, factory):
+        run = AsyncMock(return_value={"classified": 1, "unchanged": 0, "errors": []})
+        with patch("app.services.fund_category_service.categorize_funds", new=run):
+            await fcs.categorize_if_new(
+                ["NEW-SSF", "DONE-SSF", "MANUAL-SSF", "NOPROJ", "UNKNOWN", None],
+                session_factory=factory,
+            )
+        run.assert_awaited_once()
+        assert run.await_args.kwargs["proj_ids"] == {"P_NEW"}
+
+    @pytest.mark.asyncio
+    async def test_no_call_when_nothing_new(self, factory):
+        run = AsyncMock()
+        with patch("app.services.fund_category_service.categorize_funds", new=run):
+            await fcs.categorize_if_new(["DONE-SSF", "MANUAL-SSF"], session_factory=factory)
+        run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_failure_is_swallowed(self, factory):
+        run = AsyncMock(side_effect=RuntimeError("ollama down"))
+        with patch("app.services.fund_category_service.categorize_funds", new=run):
+            await fcs.categorize_if_new(["NEW-SSF"], session_factory=factory)   # must not raise
+
+
+class TestTransactionEndpointsTriggerCategorisation:
+
+    @pytest_asyncio.fixture
+    async def owner_client(self, db):
+        from fastapi.testclient import TestClient
+        from app.main import app
+        from app.database import get_db
+        from app.api.deps import get_current_user
+
+        user = User(id=uuid.uuid4(), email="owner@x", password_hash="x", role="user")
+        portfolio = Portfolio(id=uuid.uuid4(), user_id=user.id, name="P")
+        db.add_all([user, portfolio,
+                    Fund(fund_code="SRC", sec_proj_id="P_SRC", amc="AMC1"),
+                    Fund(fund_code="NEWFUND", sec_proj_id="P_NEW", amc="AMC1")])
+        await db.commit()
+
+        async def _override_db():
+            yield db
+
+        async def _override_user():
+            return user
+
+        app.dependency_overrides[get_db] = _override_db
+        app.dependency_overrides[get_current_user] = _override_user
+        yield TestClient(app), portfolio.id
+        app.dependency_overrides.clear()
+
+    @pytest.mark.asyncio
+    async def test_buy_schedules_categorisation(self, owner_client):
+        client, pid = owner_client
+        hook = AsyncMock()
+        with patch("app.api.transactions.fund_category_service.categorize_if_new", new=hook):
+            r = client.post(f"/api/v1/portfolios/{pid}/transactions", json={
+                "date": "2026-10-01", "type": "BUY", "fund_code": "NEWFUND", "units": "100",
+                "nav": "10", "amount": "1000", "fee": "0", "tax_withheld": "0", "tax_scheme": "NORMAL"})
+        assert r.status_code == 201, r.text
+        hook.assert_awaited_once_with(["NEWFUND"])
+
+    @pytest.mark.asyncio
+    async def test_sell_and_dividend_do_not_schedule(self, owner_client):
+        client, pid = owner_client
+        hook = AsyncMock()
+        with patch("app.api.transactions.fund_category_service.categorize_if_new", new=hook):
+            r = client.post(f"/api/v1/portfolios/{pid}/transactions", json={
+                "date": "2026-10-01", "type": "DIVIDEND", "fund_code": "NEWFUND",
+                "amount": "50", "fee": "0", "tax_withheld": "5", "tax_scheme": "NORMAL"})
+        assert r.status_code == 201, r.text
+        hook.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_switch_schedules_target_fund(self, owner_client):
+        client, pid = owner_client
+        client.post(f"/api/v1/portfolios/{pid}/transactions", json={
+            "date": "2026-09-01", "type": "BUY", "fund_code": "SRC", "units": "100",
+            "nav": "10", "amount": "1000", "fee": "0", "tax_withheld": "0", "tax_scheme": "NORMAL"})
+        hook = AsyncMock()
+        leg = {"date": "2026-10-01", "fee": "0", "tax_withheld": "0", "tax_scheme": "NORMAL"}
+        with patch("app.api.transactions.fund_category_service.categorize_if_new", new=hook):
+            r = client.post(f"/api/v1/portfolios/{pid}/transactions/switch", json={
+                "switch_out": {**leg, "type": "SWITCH_OUT", "fund_code": "SRC", "target_fund_code": "NEWFUND",
+                               "units": "100", "nav": "10", "amount": "1000"},
+                "switch_in": {**leg, "type": "SWITCH_IN", "fund_code": "NEWFUND", "target_fund_code": "SRC",
+                              "units": "50", "nav": "20", "amount": "1000"}})
+        assert r.status_code == 201, r.text
+        hook.assert_awaited_once_with(["NEWFUND"])
+
+    @pytest.mark.asyncio
+    async def test_csv_import_schedules_bought_funds(self, owner_client):
+        client, pid = owner_client
+        csv = ("date,type,fund_code,units,nav,amount,fee,tax_withheld,target_fund_code,pair_id,tax_scheme,note\n"
+               "2026-10-01,BUY,NEWFUND,100,10,1000,0,0,,,NORMAL,\n"
+               "2026-10-02,BUY,SRC,10,10,100,0,0,,,NORMAL,\n")
+        hook = AsyncMock()
+        with patch("app.api.transactions.fund_category_service.categorize_if_new", new=hook):
+            r = client.post(f"/api/v1/portfolios/{pid}/transactions/import-csv",
+                            files={"file": ("t.csv", csv, "text/csv")})
+        assert r.status_code == 200, r.text
+        assert r.json()["imported"] == 2
+        hook.assert_awaited_once()
+        assert set(hook.await_args.args[0]) == {"NEWFUND", "SRC"}

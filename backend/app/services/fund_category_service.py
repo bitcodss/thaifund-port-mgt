@@ -23,7 +23,7 @@ import uuid
 from datetime import datetime, timezone
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -31,6 +31,7 @@ from app.models.fund import Fund
 from app.models.tax_lot import SyncJob
 from app.services import sec_api
 from app.services.fund_taxonomy import REGIONS, THEMES
+from app.services.portfolio_service import clear_all_cache
 from app.services.sec_api import SecApiError
 from app.services.sync_service import _policy_to_asset_class, get_portfolio_proj_ids
 
@@ -228,3 +229,35 @@ async def categorize_funds(db: AsyncSession, proj_ids: set[str] | None = None, f
     await db.commit()
     logger.info("Fund categorisation: classified=%d unchanged=%d errors=%d", classified, unchanged, len(errors))
     return {"classified": classified, "unchanged": unchanged, "errors": errors}
+
+
+async def categorize_if_new(fund_codes, session_factory=None) -> None:
+    """
+    Background hook after BUY / SWITCH_IN / CSV import: categorise any of these
+    funds that have an SEC project but no category yet (manual overrides are
+    left alone). Opens its own session — the request's session is closed by now.
+    Failures are logged; the nightly run retries since region stays NULL.
+    """
+    codes = {c for c in fund_codes if c}
+    if not codes:
+        return
+    if session_factory is None:
+        from app.database import AsyncSessionLocal
+        session_factory = AsyncSessionLocal
+    try:
+        async with session_factory() as db:
+            rows = await db.execute(
+                select(Fund.sec_proj_id).where(
+                    Fund.fund_code.in_(codes),
+                    Fund.sec_proj_id.isnot(None),
+                    Fund.region.is_(None),
+                    or_(Fund.category_source.is_(None), Fund.category_source != "manual"),
+                )
+            )
+            proj_ids = {r[0] for r in rows.all()}
+            if not proj_ids:
+                return
+            await categorize_funds(db, proj_ids=proj_ids)
+        clear_all_cache()
+    except Exception:
+        logger.exception("Auto-categorisation failed for %s", sorted(codes))

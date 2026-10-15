@@ -6,7 +6,7 @@ so the audit trail and lot balances are always consistent.
 import io
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +19,7 @@ from app.schemas.transaction import (
     TransactionCreate, TransactionOut, TaxLotOut, CsvImportResponse,
 )
 from app.api.deps import get_current_user
+from app.services import fund_category_service
 from app.services import transaction_service as svc
 from app.services.csv_import import parse_csv
 from app.services.lot_engine import InsufficientUnitsError
@@ -70,6 +71,7 @@ async def list_transactions(
 async def add_transaction(
     portfolio_id: uuid.UUID,
     body: TransactionCreate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -107,6 +109,8 @@ async def add_transaction(
         raise HTTPException(status_code=400, detail=str(e))
 
     invalidate_portfolio(portfolio_id)
+    if body.type == "BUY":
+        background_tasks.add_task(fund_category_service.categorize_if_new, [body.fund_code])
     return tx
 
 
@@ -115,6 +119,7 @@ async def add_switch(
     portfolio_id: uuid.UUID,
     switch_out: TransactionCreate,
     switch_in: TransactionCreate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -159,12 +164,14 @@ async def add_switch(
         raise HTTPException(status_code=400, detail=str(e))
 
     invalidate_portfolio(portfolio_id)
+    background_tasks.add_task(fund_category_service.categorize_if_new, [switch_in.fund_code])
     return [tx_out, tx_in]
 
 
 @router.post("/import-csv", response_model=CsvImportResponse)
 async def import_csv(
     portfolio_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -205,6 +212,7 @@ async def import_csv(
     }
 
     imported = 0
+    entered_funds: set[str] = set()  # BUY / SWITCH_IN funds — auto-categorised afterwards
     import_errors = list(parse_errors)
 
     # Separate SWITCH pairs for atomic processing
@@ -247,6 +255,8 @@ async def import_csv(
                 # DIVIDEND, INTEREST: no lot mutation
             existing_keys.add(key)
             imported += 1
+            if row.type == "BUY":
+                entered_funds.add(row.fund_code)
         except InsufficientUnitsError as e:
             import_errors.append(f"Row {row.date} {row.type} {row.fund_code}: {e}")
 
@@ -279,12 +289,15 @@ async def import_csv(
                 db.add(tx_in)
                 await svc.apply_switch(db, tx_out, tx_in)
             imported += 2
+            entered_funds.add(in_row.fund_code)
         except InsufficientUnitsError as e:
             import_errors.append(f"Switch pair '{pair_id}': {e}")
 
     await db.commit()
     if imported > 0:
         invalidate_portfolio(portfolio_id)
+    if entered_funds:
+        background_tasks.add_task(fund_category_service.categorize_if_new, entered_funds)
     return CsvImportResponse(imported=imported, errors=import_errors)
 
 
