@@ -1005,7 +1005,7 @@ function ReturnCell({ value }: { value: string | null | undefined }) {
 
 type PerfSortKey =
   | "fund_code" | "latest_nav"
-  | "returns_7d" | "returns_30d" | "returns_6m" | "returns_1y" | "returns_ytd" | "returns_max"
+  | "returns_7d" | "returns_30d" | "returns_3m" | "returns_6m" | "returns_1y" | "returns_ytd" | "returns_max"
   | "sharpe_ratio" | "max_drawdown" | "annualized_volatility";
 
 function FundPerformanceSection({ holdings }: { holdings: HoldingRow[] }) {
@@ -1018,12 +1018,15 @@ function FundPerformanceSection({ holdings }: { holdings: HoldingRow[] }) {
   const [sortKey, setSortKey] = useState<PerfSortKey>("returns_max");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
-  // Build since_date map from holdings (oldest lot per fund_code)
+  // Build since_date map from holdings (first entry into this fund per fund_code).
+  // Not oldest_purchase_date: that is the tax anchor inherited across switches,
+  // which would count time the money was still in the previous fund.
   const sinceDateMap: Record<string, string | undefined> = {};
   for (const h of holdings) {
     const cur = sinceDateMap[h.fund_code];
-    if (!cur || (h.oldest_purchase_date && h.oldest_purchase_date < cur)) {
-      sinceDateMap[h.fund_code] = h.oldest_purchase_date ?? undefined;
+    const entry = h.fund_entry_date ?? h.oldest_purchase_date;
+    if (!cur || (entry && entry < cur)) {
+      sinceDateMap[h.fund_code] = entry ?? undefined;
     }
   }
 
@@ -1065,6 +1068,7 @@ function FundPerformanceSection({ holdings }: { holdings: HoldingRow[] }) {
       case "latest_nav":             return p.latest_nav ? Number(p.latest_nav) : null;
       case "returns_7d":             return p.returns_7d ? Number(p.returns_7d) : null;
       case "returns_30d":            return p.returns_30d ? Number(p.returns_30d) : null;
+      case "returns_3m":             return p.returns_3m ? Number(p.returns_3m) : null;
       case "returns_6m":             return p.returns_6m ? Number(p.returns_6m) : null;
       case "returns_1y":             return p.returns_1y ? Number(p.returns_1y) : null;
       case "returns_ytd":            return p.returns_ytd ? Number(p.returns_ytd) : null;
@@ -1120,10 +1124,11 @@ function FundPerformanceSection({ holdings }: { holdings: HoldingRow[] }) {
             <Th col="latest_nav" right>Latest NAV</Th>
             <Th col="returns_7d" right>7D</Th>
             <Th col="returns_30d" right>30D</Th>
+            <Th col="returns_3m" right>3M</Th>
             <Th col="returns_6m" right>6M</Th>
             <Th col="returns_1y" right>1Y</Th>
             <Th col="returns_ytd" right>YTD</Th>
-            <Th col="returns_max" right title="Since first current holding date">MAX*</Th>
+            <Th col="returns_max" right title="Since first entry into this fund">MAX*</Th>
             <Th col="sharpe_ratio" right>Sharpe</Th>
             <Th col="max_drawdown" right>MaxDD</Th>
             <Th col="annualized_volatility" right>Volatility</Th>
@@ -1144,6 +1149,7 @@ function FundPerformanceSection({ holdings }: { holdings: HoldingRow[] }) {
                 </td>
                 <ReturnCell value={p.returns_7d} />
                 <ReturnCell value={p.returns_30d} />
+                <ReturnCell value={p.returns_3m} />
                 <ReturnCell value={p.returns_6m} />
                 <ReturnCell value={p.returns_1y} />
                 <ReturnCell value={p.returns_ytd} />
@@ -1165,7 +1171,7 @@ function FundPerformanceSection({ holdings }: { holdings: HoldingRow[] }) {
           })}
         </tbody>
       </table>
-      <p className="text-xs text-muted-foreground px-3 py-1">* MAX คำนวณจากวันที่ซื้อล็อตปัจจุบัน (ไม่นับล็อตที่ขายไปแล้ว)</p>
+      <p className="text-xs text-muted-foreground px-3 py-1">* MAX คำนวณจากวันแรกที่เข้าถือกองทุนนี้ (ซื้อหรือสับเปลี่ยนเข้า) ไม่นับช่วงที่อยู่ในกองทุนต้นทาง · ช่วงเวลาอื่นแสดง – หากเริ่มก่อนวันที่เข้าถือ</p>
     </div>
   );
 }

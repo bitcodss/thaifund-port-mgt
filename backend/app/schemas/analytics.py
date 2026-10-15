@@ -67,6 +67,7 @@ class FundPerformance(BaseModel):
     latest_nav_date: date | None
     returns_7d: Decimal | None
     returns_30d: Decimal | None
+    returns_3m: Decimal | None
     returns_6m: Decimal | None
     returns_1y: Decimal | None
     returns_ytd: Decimal | None

@@ -296,6 +296,7 @@ export interface FundPerformance {
   latest_nav_date: string | null;
   returns_7d: string | null;
   returns_30d: string | null;
+  returns_3m: string | null;
   returns_6m: string | null;
   returns_1y: string | null;
   returns_ytd: string | null;

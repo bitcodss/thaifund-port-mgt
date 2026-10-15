@@ -25,7 +25,9 @@ QUANT = Decimal("0.00000001")
 async def get_fund_performance(fund_code: str, db: AsyncSession, since_date: date | None = None) -> FundPerformance:
     """
     Compute return for standard timeframes using cached NAV history.
-    since_date: when provided, MAX return is measured from that date (first holding date).
+    since_date: when provided (first entry into this fund), MAX is measured from it,
+    and any other timeframe whose window starts before it is None — those periods
+    weren't held in this fund.
     """
     # Pull ALL NAVs (no row limit). The 1y anchor needs ~250 trade days back,
     # which a previous LIMIT 400 just barely covered — gaps could push it out
@@ -41,7 +43,7 @@ async def get_fund_performance(fund_code: str, db: AsyncSession, since_date: dat
         return FundPerformance(
             fund_code=fund_code,
             latest_nav=None, latest_nav_date=None,
-            returns_7d=None, returns_30d=None, returns_6m=None,
+            returns_7d=None, returns_30d=None, returns_3m=None, returns_6m=None,
             returns_1y=None, returns_ytd=None, returns_max=None,
         )
 
@@ -53,6 +55,8 @@ async def get_fund_performance(fund_code: str, db: AsyncSession, since_date: dat
     )
 
     def ret(anchor_date: date) -> Decimal | None:
+        if since_date and anchor_date < since_date:
+            return None
         nav_at = _nav_on_or_before(sorted_pairs, anchor_date)
         if nav_at is None or nav_at == 0:
             return None
@@ -91,6 +95,7 @@ async def get_fund_performance(fund_code: str, db: AsyncSession, since_date: dat
         latest_nav_date=latest_date,
         returns_7d=ret(today - timedelta(days=7)),
         returns_30d=ret(today - timedelta(days=30)),
+        returns_3m=ret(today - timedelta(days=91)),
         returns_6m=ret(today - timedelta(days=182)),
         returns_1y=ret(today - timedelta(days=365)),
         returns_ytd=ret(ytd_anchor),
