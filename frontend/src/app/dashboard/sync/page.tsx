@@ -7,13 +7,12 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
-import { ArrowLeft, RefreshCw, TrendingUp, Landmark, Loader2, CheckCircle2, XCircle, Tags } from "lucide-react";
+import { ArrowLeft, RefreshCw, TrendingUp, Landmark, Loader2, CheckCircle2, XCircle } from "lucide-react";
 
 // Maps each action key to matching job types from the backend
 const JOB_MATCH: Record<string, (t: string) => boolean> = {
   nav:       (t) => t.startsWith("nav_backfill:"),
   dividends: (t) => t === "dividend_sync",
-  categories: (t) => t === "fund_category",
 };
 
 function StatusBadge({ status }: { status: string }) {
@@ -48,7 +47,6 @@ export default function SyncPage() {
   const [backfillStart, setBackfillStart] = useState(sevenDaysAgo.toISOString().slice(0, 10));
   const [backfillEnd, setBackfillEnd] = useState(new Date().toISOString().slice(0, 10));
   const [backfillPortfolioOnly, setBackfillPortfolioOnly] = useState(true);
-  const [categoriesForce, setCategoriesForce] = useState(false);
   const [messages, setMessages] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState<Record<string, boolean>>({});
   // Track when each action was last triggered so we can match its jobs
@@ -159,24 +157,6 @@ export default function SyncPage() {
       title: "Dividends",
       description: "Sync dividend history for your portfolio funds from SEC API.",
       action: () => trigger("dividends", api.syncDividends),
-    },
-    {
-      key: "categories",
-      icon: <Tags className="h-5 w-5" />,
-      title: "Fund Categories",
-      description: "Classify your portfolio funds by region and theme (e.g. AI · US Equity) using the local AI model, and refresh SEC style, master fund, FX hedge and top holdings. Runs daily at 00:00 after the automatic fund metadata sync.",
-      action: () => trigger("categories", () => api.syncCategories(categoriesForce)),
-      extra: (
-        <label className="flex items-center gap-2 cursor-pointer mt-2">
-          <input
-            type="checkbox"
-            checked={categoriesForce}
-            onChange={(e) => setCategoriesForce(e.target.checked)}
-            className="h-3.5 w-3.5"
-          />
-          <span className="text-xs text-muted-foreground">Re-classify all (ignore unchanged SEC data; manual overrides are kept)</span>
-        </label>
-      ),
     },
   ];
 

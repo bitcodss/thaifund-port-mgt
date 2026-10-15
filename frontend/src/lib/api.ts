@@ -65,8 +65,6 @@ export const api = {
     return request<{ status: string; message: string }>("POST", `/sync/nav/backfill?${params}`);
   },
   syncDividends: () => request<{ status: string; message: string }>("POST", "/sync/dividends"),
-  syncCategories: (force?: boolean) =>
-    request<{ status: string; message: string }>("POST", `/sync/categories${force ? "?force=true" : ""}`),
   syncFinnomenaNav: () => request<{ status: string; message: string }>("POST", "/sync/finnomena-nav"),
   listSyncJobs: () => request<SyncJob[]>("GET", "/sync/jobs"),
   searchFunds: (q: string) => request<FundResult[]>("GET", `/funds/search?q=${encodeURIComponent(q)}`),
