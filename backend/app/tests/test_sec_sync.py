@@ -450,7 +450,7 @@ class TestSyncNavForDate:
 
         with (
             patch("app.services.sync_service.settings") as mock_settings,
-            patch("app.services.sec_api.get_daily_nav", new_callable=AsyncMock, return_value=nav_payload),
+            patch("app.services.sec_api.get_nav_range", new_callable=AsyncMock, return_value=nav_payload),
         ):
             mock_settings.SEC_API_KEY = "fake-key"
             result = await sync_service.sync_nav_for_date(db, nav_date)
@@ -472,7 +472,7 @@ class TestSyncNavForDate:
 
         with (
             patch("app.services.sync_service.settings") as mock_settings,
-            patch("app.services.sec_api.get_daily_nav", new_callable=AsyncMock, return_value=nav_payload),
+            patch("app.services.sec_api.get_nav_range", new_callable=AsyncMock, return_value=nav_payload),
         ):
             mock_settings.SEC_API_KEY = "fake-key"
             await sync_service.sync_nav_for_date(db, nav_date)
@@ -487,7 +487,7 @@ class TestSyncNavForDate:
 
         with (
             patch("app.services.sync_service.settings") as mock_settings,
-            patch("app.services.sec_api.get_daily_nav", new_callable=AsyncMock, return_value=None),
+            patch("app.services.sec_api.get_nav_range", new_callable=AsyncMock, return_value=[]),
         ):
             mock_settings.SEC_API_KEY = "fake-key"
             result = await sync_service.sync_nav_for_date(db, date(2026, 1, 11))  # weekend
@@ -502,7 +502,7 @@ class TestSyncNavForDate:
 
         with (
             patch("app.services.sync_service.settings") as mock_settings,
-            patch("app.services.sec_api.get_daily_nav", new_callable=AsyncMock, side_effect=SecApiError("timeout")),
+            patch("app.services.sec_api.get_nav_range", new_callable=AsyncMock, side_effect=SecApiError("timeout")),
         ):
             mock_settings.SEC_API_KEY = "fake-key"
             result = await sync_service.sync_nav_for_date(db, date(2026, 1, 15))
@@ -525,7 +525,7 @@ class TestSyncNavForDate:
 
         with (
             patch("app.services.sync_service.settings") as mock_settings,
-            patch("app.services.sec_api.get_daily_nav", new_callable=AsyncMock, return_value=nav_payload),
+            patch("app.services.sec_api.get_nav_range", new_callable=AsyncMock, return_value=nav_payload),
         ):
             mock_settings.SEC_API_KEY = "fake-key"
             await sync_service.sync_nav_for_date(db, date(2026, 1, 15))
@@ -552,7 +552,7 @@ class TestSyncNavForDate:
 
         with (
             patch("app.services.sync_service.settings") as mock_settings,
-            patch("app.services.sec_api.get_daily_nav", new_callable=AsyncMock, return_value=nav_payload),
+            patch("app.services.sec_api.get_nav_range", new_callable=AsyncMock, return_value=nav_payload),
         ):
             mock_settings.SEC_API_KEY = "fake-key"
             await sync_service.sync_nav_for_date(db, nav_date)
@@ -573,7 +573,7 @@ class TestSyncNavForDate:
         ]
         with (
             patch("app.services.sync_service.settings") as mock_settings,
-            patch("app.services.sec_api.get_daily_nav", new_callable=AsyncMock, return_value=nav_payload),
+            patch("app.services.sec_api.get_nav_range", new_callable=AsyncMock, return_value=nav_payload),
         ):
             mock_settings.SEC_API_KEY = "fake-key"
             result = await sync_service.sync_nav_for_date(db, nav_date)
@@ -592,7 +592,7 @@ class TestSyncNavForDate:
         nav_payload = [{"fund_class_name": "main", "nav_date": "2026-01-15", "last_val": 12.0}]
         with (
             patch("app.services.sync_service.settings") as mock_settings,
-            patch("app.services.sec_api.get_daily_nav", new_callable=AsyncMock, return_value=nav_payload),
+            patch("app.services.sec_api.get_nav_range", new_callable=AsyncMock, return_value=nav_payload),
         ):
             mock_settings.SEC_API_KEY = "fake-key"
             await sync_service.sync_nav_for_date(db, date(2026, 1, 15))
@@ -600,6 +600,56 @@ class TestSyncNavForDate:
         row = await db.get(NavHistory, ("SCBSET", date(2026, 1, 15)))
         assert row.nav == Decimal("12.0")
         assert row.change_pct is None
+
+
+class TestSyncNavRange:
+    """Range backfill: one SEC request per fund for the whole window."""
+
+    @pytest.mark.asyncio
+    async def test_one_call_per_project_and_chained_change_pct(self, db):
+        await _seed_fund(db, "KKP DIVIDEND", "P001")
+        await _seed_fund(db, "KKP DIVIDEND-SSF", "P001")   # sibling class, same project
+        db.add(NavHistory(fund_code="KKP DIVIDEND", trade_date=date(2026, 5, 29), nav=Decimal("10")))
+        await db.commit()
+
+        # Unsorted, as SEC returns it
+        payload = [
+            {"fund_class_name": "KKP DIVIDEND", "nav_date": "2026-06-02", "last_val": 12.1},
+            {"fund_class_name": "KKP DIVIDEND-SSF", "nav_date": "2026-06-01", "last_val": 20.0},
+            {"fund_class_name": "KKP DIVIDEND", "nav_date": "2026-06-01", "last_val": 11.0},
+        ]
+        fake_range = AsyncMock(return_value=payload)
+        with (
+            patch("app.services.sync_service.settings") as mock_settings,
+            patch("app.services.sec_api.get_nav_range", new=fake_range),
+        ):
+            mock_settings.SEC_API_KEY = "fake-key"
+            result = await sync_service.sync_nav_range(db, date(2026, 6, 1), date(2026, 6, 2))
+
+        fake_range.assert_awaited_once_with("fake-key", "P001", date(2026, 6, 1), date(2026, 6, 2))
+        assert result["synced"] == 3
+        d1 = await db.get(NavHistory, ("KKP DIVIDEND", date(2026, 6, 1)))
+        d2 = await db.get(NavHistory, ("KKP DIVIDEND", date(2026, 6, 2)))
+        assert d1.change_pct == Decimal("10.00000000")   # 10 → 11, seeded from DB
+        assert d2.change_pct == Decimal("10.00000000")   # 11 → 12.1, chained in memory
+        ssf = await db.get(NavHistory, ("KKP DIVIDEND-SSF", date(2026, 6, 1)))
+        assert ssf.change_pct is None                     # no earlier SSF NAV
+        assert (await db.get(Fund, "KKP DIVIDEND")).last_nav_date == date(2026, 6, 2)
+
+    @pytest.mark.asyncio
+    async def test_writes_single_backfill_job(self, db):
+        await _seed_fund(db, "SCBSET", "P001")
+        await db.commit()
+        with (
+            patch("app.services.sync_service.settings") as mock_settings,
+            patch("app.services.sec_api.get_nav_range", new_callable=AsyncMock, return_value=[]),
+        ):
+            mock_settings.SEC_API_KEY = "fake-key"
+            await sync_service.sync_nav_range(db, date(2026, 6, 1), date(2026, 6, 30))
+
+        jobs = (await db.execute(select(SyncJob))).scalars().all()
+        assert [j.type for j in jobs] == ["nav_backfill:2026-06-01:2026-06-30"]
+        assert jobs[0].status == "success"
 
 # ── sync_dividends ─────────────────────────────────────────────────────────────
 
@@ -942,7 +992,7 @@ class TestNavCatchup:
         """No portfolio funds → return early, no SEC calls, no sync_jobs row."""
         from app.main import nav_catchup
         # Patch sec_api so a stray call would blow up loudly
-        with patch("app.services.sync_service.sec_api.get_daily_nav",
+        with patch("app.services.sync_service.sec_api.get_nav_range",
                    new=AsyncMock(side_effect=AssertionError("should not be called"))):
             with patch("app.services.sync_service.settings") as mock_settings:
                 mock_settings.SEC_API_KEY = "fake-key"
@@ -962,26 +1012,17 @@ class TestNavCatchup:
         db.add(NavHistory(fund_code="FUND_X", trade_date=last_have, nav=Decimal("10")))
         await db.commit()
 
-        # Track every date that the underlying sync_nav_for_date is asked about
-        called_dates: list[date] = []
-        async def fake_sync_for_date(db_, nav_date, proj_ids=None):
-            called_dates.append(nav_date)
-            return {"synced": 1, "skipped": 0, "errors": []}
-
+        fake_range = AsyncMock(return_value=[])
         with (
-            patch("app.services.sync_service.sync_nav_for_date", new=fake_sync_for_date),
+            patch("app.services.sync_service.sec_api.get_nav_range", new=fake_range),
             patch("app.services.sync_service.settings") as mock_settings,
         ):
             mock_settings.SEC_API_KEY = "fake-key"
             await nav_catchup(db)
 
-        # Range is last_have+1 .. yesterday, weekdays only
+        # One range request per fund covering last_have+1 .. yesterday
         expected_start = last_have + __import__("datetime").timedelta(days=1)
-        assert called_dates, "sync_nav_for_date should have been called at least once"
-        # All called dates fall in [expected_start, yesterday] and are weekdays
-        for d in called_dates:
-            assert expected_start <= d <= yesterday
-            assert d.weekday() < 5
+        fake_range.assert_awaited_once_with("fake-key", "PROJX", expected_start, yesterday)
 
     @pytest.mark.asyncio
     async def test_no_op_when_already_up_to_date(self, db):
@@ -995,7 +1036,7 @@ class TestNavCatchup:
         await db.commit()
 
         with patch(
-            "app.services.sync_service.sync_nav_for_date",
+            "app.services.sync_service.sec_api.get_nav_range",
             new=AsyncMock(side_effect=AssertionError("should not be called")),
         ):
             await nav_catchup(db)
@@ -1012,20 +1053,17 @@ class TestNavCatchup:
         db.add(NavHistory(fund_code="FUND_X", trade_date=last_have, nav=Decimal("10")))
         await db.commit()
 
-        called_dates: list[date] = []
-        async def fake_sync_for_date(db_, nav_date, proj_ids=None):
-            called_dates.append(nav_date)
-            return {"synced": 1, "skipped": 0, "errors": []}
-
+        fake_range = AsyncMock(return_value=[])
         with (
-            patch("app.services.sync_service.sync_nav_for_date", new=fake_sync_for_date),
+            patch("app.services.sync_service.sec_api.get_nav_range", new=fake_range),
             patch("app.services.sync_service.settings") as mock_settings,
         ):
             mock_settings.SEC_API_KEY = "fake-key"
             await nav_catchup(db)
 
-        # Earliest called date must be >= yesterday - (MAX_DAYS - 1)
+        # Requested range starts at yesterday - (MAX_DAYS - 1), not at last_have + 1
         min_allowed = yesterday - __import__("datetime").timedelta(days=NAV_CATCHUP_MAX_DAYS - 1)
-        assert called_dates, "should have called sync_nav_for_date at least once"
-        assert min(called_dates) >= min_allowed
-        assert min(called_dates) > last_have + __import__("datetime").timedelta(days=1)
+        fake_range.assert_awaited_once()
+        _, _, start, end = fake_range.await_args.args
+        assert start == min_allowed
+        assert end == yesterday

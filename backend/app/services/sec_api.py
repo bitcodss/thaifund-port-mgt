@@ -133,15 +133,16 @@ async def list_amcs(key: str) -> list[dict]:
     return await _get_items(key, "/general-info/amcs")
 
 
-async def get_daily_nav(key: str, proj_id: str, nav_date: date) -> list[dict]:
+async def get_nav_range(key: str, proj_id: str, start_date: date, end_date: date) -> list[dict]:
     """
-    GET /daily-info/nav for a single date.
-    Returns one dict per share class with keys: fund_class_name, nav_date, last_val, ...
-    Returns [] on weekend/holiday (HTTP 204).
+    GET /daily-info/nav for [start_date, end_date] in one paginated request.
+    Returns one dict per (share class, trading day) with keys: fund_class_name,
+    nav_date, last_val, ... — unsorted. Weekends/holidays are simply absent.
     """
-    date_str = nav_date.strftime("%Y-%m-%d")
     return await _get_items(key, "/daily-info/nav", {
-        "proj_id": proj_id, "start_nav_date": date_str, "end_nav_date": date_str,
+        "proj_id": proj_id,
+        "start_nav_date": start_date.strftime("%Y-%m-%d"),
+        "end_nav_date": end_date.strftime("%Y-%m-%d"),
     })
 
 

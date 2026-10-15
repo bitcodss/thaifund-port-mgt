@@ -308,6 +308,24 @@ async def sync_nav_for_date(db: AsyncSession, nav_date: date, proj_ids: set[str]
     If proj_ids is given, only sync those projects (portfolio-only backfill).
     Otherwise syncs all active funds.
     """
+    return await _sync_nav(db, nav_date, nav_date, proj_ids, f"nav_sync:{nav_date}")
+
+
+async def sync_nav_range(db: AsyncSession, start_date: date, end_date: date, proj_ids: set[str] | None = None) -> dict:
+    """
+    Backfill NAV history for [start_date, end_date] — one paginated SEC call per
+    fund for the whole range (weekends/holidays are simply absent from the data).
+    """
+    return await _sync_nav(db, start_date, end_date, proj_ids, f"nav_backfill:{start_date}:{end_date}")
+
+
+async def _sync_nav(
+    db: AsyncSession,
+    start_date: date,
+    end_date: date,
+    proj_ids: set[str] | None,
+    job_type: str,
+) -> dict:
     key = settings.SEC_API_KEY
     if not key:
         return {"synced": 0, "skipped": 0, "errors": ["SEC_API_KEY not configured"]}
@@ -322,7 +340,8 @@ async def sync_nav_for_date(db: AsyncSession, nav_date: date, proj_ids: set[str]
     if not funds:
         return {"synced": 0, "skipped": 0, "errors": ["No funds found"]}
 
-    job = await _start_job(db, f"nav_sync:{nav_date}")
+    job = await _start_job(db, job_type)
+    await db.commit()  # make the job visible immediately
     synced = skipped = 0
     errors: list[str] = []
     seen_proj_ids: set[str] = set()
@@ -332,115 +351,99 @@ async def sync_nav_for_date(db: AsyncSession, nav_date: date, proj_ids: set[str]
             continue
         seen_proj_ids.add(fund.sec_proj_id)
         try:
-            data = await sec_api.get_daily_nav(key, fund.sec_proj_id, nav_date)
+            entries = await sec_api.get_nav_range(key, fund.sec_proj_id, start_date, end_date)
         except SecApiError as e:
             errors.append(f"{fund.fund_code}: {e}")
             skipped += 1
             continue
 
-        if not data:
+        fund_synced = await _upsert_nav_entries(db, fund, entries)
+        if fund_synced:
+            synced += fund_synced
+        else:
             skipped += 1
+        await db.commit()  # per-fund commit: a later failure keeps earlier funds' rows
+
+    job = await db.get(SyncJob, job.id)
+    err_str = "; ".join(errors[:5]) if errors else None
+    notes = f"synced:{synced} skipped:{skipped}" if not err_str else None
+    await _finish_job(db, job, err_str, notes)
+    await db.commit()
+    logger.info("NAV sync %s→%s: synced=%d skipped=%d errors=%d",
+                start_date, end_date, synced, skipped, len(errors))
+    return {"synced": synced, "skipped": skipped, "errors": errors}
+
+
+async def _upsert_nav_entries(db: AsyncSession, fund: Fund, entries: list[dict]) -> int:
+    """
+    Upsert nav_history rows for one SEC project (all share classes, any number of
+    days). Returns the number of rows written.
+    """
+    rows: list[tuple[str, date, Decimal]] = []
+    for entry in entries:
+        # Use fund_class_name when present (e.g. "KKP DIVIDEND-SSF"), else fall back to fund code
+        class_abbr = (entry.get("fund_class_name") or entry.get("class_abbr_name") or "").strip()
+        # "main" / "-" are generic SEC API placeholders, not real fund abbreviations
+        nav_code = class_abbr if class_abbr and class_abbr.lower() not in ("main", "-") else fund.fund_code
+
+        nav_val = entry.get("last_val") or entry.get("nav_value")
+        nav_date_raw = entry.get("nav_date")
+        if nav_val is None or not nav_date_raw:
             continue
+        rows.append((nav_code, date.fromisoformat(str(nav_date_raw)[:10]), Decimal(str(nav_val))))
 
-        entries = data if isinstance(data, list) else [data]
-        fund_synced = False
+    # SEC returns rows unsorted; change_pct needs each class in date order.
+    rows.sort(key=lambda r: (r[0], r[1]))
+    prev_nav: dict[str, Decimal | None] = {}
 
-        for entry in entries:
-            # Use fund_class_name when present (e.g. "KKP DIVIDEND-SSF"), else fall back to fund code
-            class_abbr = (entry.get("fund_class_name") or entry.get("class_abbr_name") or "").strip()
-            # "main" / "-" are generic SEC API placeholders, not real fund abbreviations
-            nav_code = class_abbr if class_abbr and class_abbr.lower() not in ("main", "-") else fund.fund_code
-
-            nav_val = entry.get("last_val") or entry.get("nav_value")
-            if nav_val is None:
-                continue
-
-            nav_dec = Decimal(str(nav_val))
-            # v2 has no previous_val — compare against the latest stored NAV before this date
-            prev_dec = (await db.execute(
+    for nav_code, nav_date, nav_dec in rows:
+        if nav_code not in prev_nav:
+            # v2 has no previous_val — seed from the latest stored NAV before this
+            # class's first date in the batch; later days chain in memory.
+            prev_nav[nav_code] = (await db.execute(
                 select(NavHistory.nav)
                 .where(NavHistory.fund_code == nav_code, NavHistory.trade_date < nav_date)
                 .order_by(NavHistory.trade_date.desc())
                 .limit(1)
             )).scalar()
-            change_pct: Decimal | None = None
-            if prev_dec:
-                change_pct = ((nav_dec - prev_dec) / prev_dec * 100).quantize(Decimal("0.00000001"))
+        prev_dec = prev_nav[nav_code]
+        change_pct: Decimal | None = None
+        if prev_dec:
+            change_pct = ((nav_dec - prev_dec) / prev_dec * 100).quantize(Decimal("0.00000001"))
+        prev_nav[nav_code] = nav_dec
 
-            # Auto-create a Fund record for this class if it doesn't exist yet
-            class_fund = await db.get(Fund, nav_code)
-            if class_fund is None:
-                class_fund = Fund(
-                    fund_code=nav_code,
-                    sec_proj_id=fund.sec_proj_id,
-                    name_en=fund.name_en,
-                    name_th=fund.name_th,
-                    amc=fund.amc,
-                    amc_unique_id=fund.amc_unique_id,
-                    fund_status=fund.fund_status,
-                )
-                db.add(class_fund)
-                await db.flush()
+        # Auto-create a Fund record for this class if it doesn't exist yet
+        class_fund = await db.get(Fund, nav_code)
+        if class_fund is None:
+            class_fund = Fund(
+                fund_code=nav_code,
+                sec_proj_id=fund.sec_proj_id,
+                name_en=fund.name_en,
+                name_th=fund.name_th,
+                amc=fund.amc,
+                amc_unique_id=fund.amc_unique_id,
+                fund_status=fund.fund_status,
+            )
+            db.add(class_fund)
+            await db.flush()
 
-            # Upsert nav_history for this class
-            existing = await db.get(NavHistory, (nav_code, nav_date))
-            if existing:
-                existing.nav = nav_dec
-                existing.change_pct = change_pct
-            else:
-                db.add(NavHistory(
-                    fund_code=nav_code,
-                    trade_date=nav_date,
-                    nav=nav_dec,
-                    change_pct=change_pct,
-                ))
+        # Upsert nav_history for this class
+        existing = await db.get(NavHistory, (nav_code, nav_date))
+        if existing:
+            existing.nav = nav_dec
+            existing.change_pct = change_pct
+        else:
+            db.add(NavHistory(
+                fund_code=nav_code,
+                trade_date=nav_date,
+                nav=nav_dec,
+                change_pct=change_pct,
+            ))
 
+        if class_fund.last_nav_date is None or nav_date > class_fund.last_nav_date:
             class_fund.last_nav_date = nav_date
-            fund_synced = True
-            synced += 1
 
-        if not fund_synced:
-            skipped += 1
-
-    err_str = "; ".join(errors[:5]) if errors else None
-    notes = f"synced:{synced} skipped:{skipped}" if not err_str else None
-    await _finish_job(db, job, err_str, notes)
-    await db.commit()
-    logger.info("NAV sync %s: synced=%d skipped=%d errors=%d", nav_date, synced, skipped, len(errors))
-    return {"synced": synced, "skipped": skipped, "errors": errors}
-
-
-# ── NAV range backfill ────────────────────────────────────────────────────────
-
-async def sync_nav_range(db: AsyncSession, start_date: date, end_date: date, proj_ids: set[str] | None = None) -> dict:
-    """
-    Backfill NAV history for every weekday in [start_date, end_date].
-    Creates one parent nav_backfill job plus one nav_sync:{date} job per date.
-    """
-    from datetime import timedelta
-    parent_job = await _start_job(db, f"nav_backfill:{start_date}:{end_date}")
-    await db.commit()  # make the job visible immediately
-
-    current = start_date
-    days_attempted = days_skipped = 0
-    errors: list[str] = []
-    while current <= end_date:
-        if current.weekday() < 5:  # Mon–Fri only
-            result = await sync_nav_for_date(db, current, proj_ids=proj_ids)
-            if result.get("synced", 0) == 0 and not result.get("errors"):
-                days_skipped += 1
-            else:
-                days_attempted += 1
-            errors.extend(result.get("errors", []))
-        current += timedelta(days=1)
-
-    # Re-fetch parent_job after all the intermediate commits
-    refreshed = await db.get(SyncJob, parent_job.id)
-    err_str = "; ".join(errors[:3]) if errors else None
-    notes = f"days:{days_attempted} skipped:{days_skipped}"
-    await _finish_job(db, refreshed, err_str, notes if not err_str else None)
-    await db.commit()
-    return {"days_attempted": days_attempted, "days_skipped": days_skipped}
+    return len(rows)
 
 
 # ── Dividend sync (v2 daily-info/dividend-history) ─────────────────────────────────────────
