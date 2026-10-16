@@ -35,6 +35,14 @@ numbers computed by code, poorly performing funds first. Local Ollama only.
   LLM from a fixed list per AIMC category, using name, master fund, benchmark, holdings and
   policy text. Theme group if ≥5 funds after dedup, else AIMC category. Dedup one per
   project / master fund. Median + percentile; rank ("2 of 4") under ~5 funds.
+- Market-wide holdings (names + weights from SEC factsheets) are ONLY an input to the LLM
+  peer-theme classifier — no ticker resolution outside held funds. Parser tuning stops once
+  holdings are missing for less than ~10–15% of funds in the AIMC categories of held funds'
+  peer groups. Funds without holdings are classified from fund name, master fund, benchmark
+  and investment policy instead.
+- Every factsheet row records `holdings_parser_version` / `aimc_parser_version` and parse
+  times (`legacy` = before versions were recorded), so suspicious data can be traced to a
+  parser version and re-parsed selectively.
 - Passive and ESG are separate flags (`is_passive`, `is_esg`), not themes.
 - Theme lists (approved): Technology Equity: AI · Semiconductor · Cybersecurity · Robotics &
   Automation · Internet & Digital · General Technology | Other Global Sector Equity: Gold &

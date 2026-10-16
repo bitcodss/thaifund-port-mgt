@@ -98,5 +98,11 @@ class FundFactsheet(Base):
     aimc_category: Mapped[str | None] = mapped_column(String(150), nullable=True, index=True)  # official name
     fx_hedge_pct: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)  # actual, when printed
     scan_status: Mapped[str] = mapped_column(String(20), nullable=False, default="ok")  # ok|no_factsheet|error
+    # Provenance: which parser produced the stored holdings / AIMC category, and when. A protected
+    # re-parse keeps older data when the new result is worse, so these can differ per field group.
+    holdings_parser_version: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    holdings_parsed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    aimc_parser_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    aimc_parsed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     scan_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

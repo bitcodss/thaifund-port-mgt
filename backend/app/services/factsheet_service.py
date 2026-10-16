@@ -33,6 +33,11 @@ from app.services.aimc import canonical_category
 
 logger = logging.getLogger(__name__)
 
+# Bump whenever parsing rules change, so stored rows can be traced to (and re-parsed by) version.
+#   legacy — rows parsed before versions were recorded (several rule sets, 2026-10-16)
+#   fs-5   — Thai-script holdings, per-cell headings, security-like quality comparison
+PARSER_VERSION = "fs-5"
+
 # "5 อันดับ" incl. pdftotext's dropped vowels/tone marks ("5 อนดบ", "5 อั นดับ")
 _ANCHOR = re.compile(r"5\s*อ\S{0,2}น?\S{0,2}ด\S{0,2}บ")
 _MASTER_HINT = re.compile(r"กอง\S{0,3}ท?\S{0,3}น?\S{0,3}หล\S{0,2}ก|กองหลัก|master fund", re.I)
@@ -281,6 +286,11 @@ def apply_parsed(stored: FundFactsheet, text: str, same_document: bool = False) 
     for field, value in new.items():
         if field not in keep:
             setattr(stored, field, value)
+    now = datetime.now(timezone.utc)
+    if not keep & set(_HOLDINGS_FIELDS):
+        stored.holdings_parser_version, stored.holdings_parsed_at = PARSER_VERSION, now
+    if "aimc_category" not in keep:
+        stored.aimc_parser_version, stored.aimc_parsed_at = PARSER_VERSION, now
     return outcome
 
 

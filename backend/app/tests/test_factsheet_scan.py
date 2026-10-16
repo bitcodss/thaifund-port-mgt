@@ -335,3 +335,24 @@ async def test_old_junk_is_not_protected_by_the_merge(db):
         r = await fs.scan_factsheets(db, force=True)
     assert r["reparse"]["holdings"] == {"better": 0, "same": 1, "worse": 0}   # 0 real securities either way
     assert (await db.get(FundFactsheet, "P1")).holdings_scope == "fund_units"
+
+
+@pytest.mark.asyncio
+async def test_parser_version_recorded_and_kept_with_protected_data(db):
+    await _seed(db, "P1")
+    a, b, c = _patches(latest=("https://pdf", date(2026, 9, 30)), text=GOOD)
+    with a, b, c:
+        await fs.scan_factsheets(db)
+    row = await db.get(FundFactsheet, "P1")
+    assert (row.holdings_parser_version, row.aimc_parser_version) == (fs.PARSER_VERSION, fs.PARSER_VERSION)
+    first_parsed = row.holdings_parsed_at
+
+    # simulate an older parser's data, then a worse re-parse: stored data AND its version stay
+    row.holdings_parser_version = row.aimc_parser_version = "legacy"
+    await db.commit()
+    a, b, c = _patches(latest=("https://pdf", date(2026, 9, 30)), text=WORSE)
+    with a, b, c:
+        await fs.scan_factsheets(db, force=True)
+    row = await db.get(FundFactsheet, "P1")
+    assert (row.holdings_parser_version, row.aimc_parser_version) == ("legacy", "legacy")
+    assert row.holdings_parsed_at == first_parsed
