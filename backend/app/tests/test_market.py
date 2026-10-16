@@ -516,6 +516,30 @@ class TestFactsheetParsing:
         text = "ข้อมูลกองทุนหลัก 5 อันดับแรก\n      Series PLC-Jupiter Gold and        97.14\n"
         assert parse_top_holdings(text)["fund_units_only"] is True
 
+    def test_thai_stock_names_and_industry_table_skipped(self):
+        from app.services.factsheet_service import parse_top_holdings
+        text = ("การจัดสรรการลงทุนในกลุ่มอุตสาหกรรม 5 อันดับแรก\n"
+                "   พาณิชย์                                     12.68\n"
+                "   ธนาคาร                                      10.10\n"
+                "                                              ทรัพย์สินที่ลงทุน 5 อันดับแรก\n"
+                "   ค่าธรรมเนียม                                บมจ.เดลต้า อีเลคโทรนิคส์ (ประเทศไทย)            9.97\n"
+                "   ขาย)                                        บมจ.ปตท.                                        5.22\n")
+        b = parse_top_holdings(text)
+        assert [r["name"] for r in b["rows"]] == ["บมจ.เดลต้า อีเลคโทรนิคส์ (ประเทศไทย)", "บมจ.ปตท."]
+        assert b.get("fund_units_only") is None
+
+    def test_left_column_value_glued_to_name(self):
+        from app.services.factsheet_service import parse_top_holdings
+        text = ("x 5 อันดับแรก\n"
+                "                    96.19 NVIDIA CORP                              9.97\n"
+                "ือหนี้สินอื่น       -0.14 APPLE INC                                9.83\n")
+        assert [r["name"] for r in parse_top_holdings(text)["rows"]] == ["NVIDIA CORP", "APPLE INC"]
+
+    def test_thai_fund_unit_row_is_a_fund_unit(self):
+        from app.services.factsheet_service import parse_top_holdings
+        text = "ทรัพย์สินที่ลงทุน 5 อันดับแรก\n   หน่วยลงทุน JANUS HENDERSON FUND        99.14\n"
+        assert parse_top_holdings(text)["fund_units_only"] is True
+
     def test_garbled_thai_anchor(self):
         from app.services.factsheet_service import parse_top_holdings
         text = "ทรพยสนทลงทน 5 อนดบแรก\n      Eli Lilly & Co        9.16\n      AbbVie Inc       4.63\n"

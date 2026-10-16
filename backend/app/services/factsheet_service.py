@@ -37,7 +37,15 @@ logger = logging.getLogger(__name__)
 _ANCHOR = re.compile(r"5\s*อ\S{0,2}น?\S{0,2}ด\S{0,2}บ")
 _MASTER_HINT = re.compile(r"กอง\S{0,3}ท?\S{0,3}น?\S{0,3}หล\S{0,2}ก|กองหลัก|master fund", re.I)
 _END = re.compile(r"หม\S{0,3}ายเหต|Weblink|ISIN")
-_ROW = re.compile(r"([A-Za-z][A-Za-z0-9&.,'()\-/ ]{1,90}?)\s{2,}(-?\d{1,3}\.\d{1,2})\s*%?\s*$")
+# Holding names may be Latin ("NVIDIA CORP") or Thai ("บมจ.ปตท.") — Thai stock and bond funds.
+# The name is only the text after the LAST wide gap before the weight, so left-column
+# Thai prose on the same layout line never becomes part of it.
+_ROW = re.compile(r"(?:^|\s{2,})(\S(?:(?!\s{2}).){1,90}?)\s{2,}(-?\d{1,3}\.\d{1,2})\s*%?\s*$")
+_NAME_START = re.compile(r"[A-Za-z\u0e00-\u0e7f]")
+# Thai table filler that lands in the weight column: other assets, deposits, fees, page text
+_THAI_FILLER = re.compile(r"อ\S{0,2}น\s*ๆ|อ\S{0,2}น$|เง\S{0,2}นฝาก|ค\S{0,2}าธรรมเน|หน\S{0,2}า\s*\d|ลดลง|จร\S{0,2}ง$")
+# "5 อันดับแรก" headings of allocation tables (industry / country / credit rating) — not holdings
+_ALLOCATION_ANCHOR = re.compile(r"อ\S{0,2}ตสาหกรรม|ต\S{0,2}างประเทศ|ประเทศ\s*5|ความน\S{0,2}าเช\S{0,2}อถ\S{0,2}อ")
 _ISIN = re.compile(r"ISIN\s*code\s*:\s*([A-Z]{2}[A-Z0-9]{9}\d)")
 # Allocation-table rows (countries, sectors) that look like "name  12.34" but aren't holdings
 _ALLOCATION_ROW = re.compile(
@@ -46,8 +54,9 @@ _ALLOCATION_ROW = re.compile(
     r"OTHERS?|CASH|INFORMATION TECHNOLOGY|TECHNOLOGY|HEALTH ?CARE|FINANCIALS|INDUSTRIALS|MATERIALS|ENERGY|"
     r"UTILITIES|REAL ESTATE|COMMUNICATION SERVICES|CONSUMER (DISCRETIONARY|STAPLES|DUR\S*))$", re.I)
 _COMPANY_HINT = re.compile(r"\b(Inc|Corp|Corporation|Co|Ltd|Limited|plc|PLC|Holdings?|Group|AG|SA|NV|ASA|"
-                           r"KGaA|SE|Bhd|Tbk|Class [A-Z]|[A-Z]{1,5} (US|UW|UN|UQ))\b\.?", re.I)
-_FUND_UNIT = re.compile(r"\b(FUND|ETF|PORTFOLIO|SICAV|UCITS|TRUST)\b", re.I)
+                           r"KGaA|SE|Bhd|Tbk|Class [A-Z]|[A-Z]{1,5} (US|UW|UN|UQ))\b\.?|"
+                           r"บมจ|บริษัท|ธนาคาร|พันธบัตร|หุ้นกู้|ตั๋ว", re.I)
+_FUND_UNIT = re.compile(r"\b(FUND|ETF|PORTFOLIO|SICAV|UCITS|TRUST)\b|หน\S{0,2}วยลงท\S{0,2}น|กองท\S{0,2}นรวม", re.I)
 
 
 def parse_top_holdings(text: str) -> dict | None:
@@ -60,7 +69,7 @@ def parse_top_holdings(text: str) -> dict | None:
     blocks = []
     for i, line in enumerate(lines):
         m = _ANCHOR.search(line)
-        if not m:
+        if not m or _ALLOCATION_ANCHOR.search(line):
             continue
         col = max(0, m.start() - 45)
         rows = []
@@ -69,8 +78,17 @@ def parse_top_holdings(text: str) -> dict | None:
             if rows and _END.search(seg):
                 break
             r = _ROW.search(seg)
-            if r and not _ALLOCATION_ROW.match(r.group(1).strip()):
-                rows.append({"name": r.group(1).strip(), "pct": float(r.group(2))})
+            if not r:
+                continue
+            # strip a left-column value glued on with one space ("96.19 NVIDIA CORP")
+            name = re.sub(r"^[-−]?\d[\d.,]*\s+", "", r.group(1).strip())
+            latin = re.search(r"[A-Za-z]", name)
+            if latin and re.match(r"[\u0e00-\u0e7f]", name):
+                # Thai text in front of a Latin name is left-column bleed ("หน TENCENT…",
+                # "…ผลตอบแทนลดลง NVIDIA CORP") — Thai holding names don't start Thai then switch
+                name = name[latin.start():]
+            if _NAME_START.match(name) and not _ALLOCATION_ROW.match(name) and not _THAI_FILLER.search(name):
+                rows.append({"name": name, "pct": float(r.group(2))})
         if rows:
             # a block can mix the feeder's own fund-unit row with the master's securities
             # (>= 50% of NAV in one line is a fund unit even when the name is cut off)
