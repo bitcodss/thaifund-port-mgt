@@ -370,6 +370,23 @@ export interface PeerGroup {
   borderline_excluded?: number;
   theme_unreviewed?: number;
   masters?: PeerMaster[];
+  latest_snapshot?: PeerSnapshot | null;
+}
+
+export interface PeerSnapshot {
+  month: string;
+  basis: "theme" | "category" | null;
+  flag_eligible: boolean;
+  hedge_basis: "same_hedge" | "fx_adjusted" | null;
+  peer_masters: number | null;
+  fx_adjusted_masters: number | null;
+  ret_1m: number | null; ret_3m: number | null; ret_6m: number | null; ret_1y: number | null;
+  median_1m: number | null; median_3m: number | null; median_6m: number | null; median_1y: number | null;
+  pct_1m: number | null; pct_3m: number | null; pct_6m: number | null; pct_1y: number | null;
+  fx_effect_1m: number | null;
+  hedge_ratio: number | null;
+  hedge_ratio_estimated: boolean | null;
+  backfilled: boolean;
 }
 
 export interface FundProxy {

@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api, type PeerGroup, type PendingCategory } from "@/lib/api";
+import { api, type PeerGroup, type PeerSnapshot, type PendingCategory } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -74,6 +74,7 @@ function GroupCard({ g, themes, isAdmin, onChanged }: {
               {!!g.borderline_excluded && ` · ${g.borderline_excluded} borderline master(s) left out (models disagreed on theme)`}
               {!!g.theme_unreviewed && ` · theme unreviewed: ${g.theme_unreviewed} master(s)`}
             </p>
+            {g.latest_snapshot && <SnapshotRow s={g.latest_snapshot} />}
             <button className="flex items-center gap-1 text-xs text-primary" onClick={() => setOpen(!open)}>
               {open ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />} Peers
             </button>
@@ -170,6 +171,40 @@ function PendingTable({ categories, onDone }: { categories: string[]; onDone: ()
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+const pctFmt = (v: number | null) => (v == null ? "–" : `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%`);
+
+function SnapshotRow({ s }: { s: PeerSnapshot }) {
+  const month = new Date(s.month).toLocaleDateString("en-GB", { month: "short", year: "numeric" });
+  const cells = (["1m", "3m", "6m", "1y"] as const).map((h) => ({
+    h, ret: s[`ret_${h}`], med: s[`median_${h}`], pct: s[`pct_${h}`],
+  }));
+  return (
+    <div className="space-y-1">
+      <div className="grid grid-cols-4 gap-2 text-xs">
+        {cells.map((c) => (
+          <div key={c.h} className="rounded-md border p-1.5">
+            <div className="text-muted-foreground uppercase">{c.h}</div>
+            <div className="font-medium tabular-nums">{pctFmt(c.ret)}</div>
+            <div className="text-muted-foreground tabular-nums">peers {pctFmt(c.med)}</div>
+            <div className={`tabular-nums ${c.pct != null && c.pct < 25 ? "text-red-600 dark:text-red-400" : ""}`}>
+              {c.pct == null ? "no rank" : `pct ${Math.round(c.pct)}`}
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        Month-end {month}{s.backfilled && " (backfilled with today's peer list)"} · {s.peer_masters} other masters ·{" "}
+        {s.hedge_basis === "fx_adjusted"
+          ? `FX-adjusted (${s.fx_adjusted_masters} masters in another hedge group)`
+          : "same hedge group"}
+        {s.hedge_ratio != null && ` · hedge ${Math.round(s.hedge_ratio * 100)}%${s.hedge_ratio_estimated ? " (estimate)" : ""}`}
+        {s.fx_effect_1m != null && ` · FX effect 1M ${pctFmt(s.fx_effect_1m)}`}
+        {!s.flag_eligible && " · rank is context only (whole-category comparison)"}
+      </p>
+    </div>
   );
 }
 
