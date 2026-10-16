@@ -209,7 +209,10 @@ async def build_peer_profiles(db: AsyncSession, proj_ids: set[str] | None = None
         prof.representative_code = rep
         prof.hedge_group = hedge_group(rep_row.get("exchange_rate_protection_policy"), base.get("invest_country_flag"))
         prof.hedge_source = "sec"
-        if prof.hedge_group == "unknown" and fs_row.fx_hedge_policy:
+        pct = fs_row.fx_hedge_pct
+        contradicts = pct is not None and ((fs_row.fx_hedge_policy == "unhedged" and pct > 0)
+                                           or (fs_row.fx_hedge_policy == "full" and pct < 50))
+        if prof.hedge_group == "unknown" and fs_row.fx_hedge_policy and not contradicts:
             # SEC profile leaves the policy empty; the factsheet prints it ("ไม่ป้องกัน (unhedged)")
             prof.hedge_group, prof.hedge_source = fs_row.fx_hedge_policy, "factsheet"
         prof.is_passive = base.get("management_style") in _PASSIVE_STYLES

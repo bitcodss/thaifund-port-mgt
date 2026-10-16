@@ -438,3 +438,21 @@ class TestBorderlineAndRules:
         p = await db.get(PeerProfile, "NEW")
         assert (p.aimc_category, p.aimc_source) == ("Commodities Precious Metals", "inherited") and ps.is_approved(p)
         infer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_hedge_falls_back_to_factsheet_wording_unless_it_contradicts_the_printed_pct(db):
+    from decimal import Decimal
+    await _seed(db, "H1", "US Equity")
+    await _seed(db, "H2", "US Equity")
+    for pid, pol, pct in (("H1", "unhedged", None), ("H2", "unhedged", Decimal("76.62"))):
+        f = await db.get(FundFactsheet, pid)
+        f.fx_hedge_policy, f.fx_hedge_pct = pol, pct
+    await db.commit()
+    profiles = {p: _profile(p, p) for p in ("H1", "H2")}
+    for rows in profiles.values():
+        rows[0]["exchange_rate_protection_policy"] = ""                 # SEC field empty (MEGA10)
+    await _run(db, profiles, theme=AsyncMock(return_value="Growth"))
+    h1, h2 = await db.get(PeerProfile, "H1"), await db.get(PeerProfile, "H2")
+    assert (h1.hedge_group, h1.hedge_source) == ("unhedged", "factsheet")
+    assert (h2.hedge_group, h2.hedge_source) == ("unknown", "sec")      # wording vs 76.62% → don't guess

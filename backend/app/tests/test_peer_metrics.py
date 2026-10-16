@@ -71,6 +71,10 @@ class TestHedgePolicyParse:
         ("การป้องกันความเสี่ยง                ตามดุลพินจิ ของผู้จัดการกองทุน", "dynamic"),
         ("กองทุนไมปองกันความเสี่ยงจากอัตราแลกเปลี่ยน จึงอาจมีความเสี่ยง", None),  # prose, not the label
         ("การป้องกันความเสี่ยง  ตามดุลพินิจ\nการป้องกันความเสี่ยง  ไม่ป้องกัน (unhedged)", None),  # classes differ
+        # MEGA10: marks as private-use glyphs
+        ("Peer avg        การป\uf706องกันความเสี่ยง FX ไม\uf70aป\uf706องกัน (unhedged)", "unhedged"),
+        # KT-GEQ: letters spaced out, "ด้าน" inserted, value spaced out too
+        ("ทมตวแปรเป็นอตราแลก    การป\uf706 อ งก ั น ความเส ี่ ย งด\uf70b า น FX       ไม\uf70a ป \uf706 อ งก ั น", "unhedged"),
     ])
     def test_label_values(self, text, expected):
         assert parse_fx_hedge_policy(text) == expected

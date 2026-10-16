@@ -205,8 +205,11 @@ def parse_fx_hedge_pct(text: str) -> Decimal | None:
 
 # Thai vowel / tone marks — PDF text drops or doubles them inconsistently ("ไมปองกัน",
 # "กํารป้องกันควํามเสี่ยง"), so the hedge label is matched on a skeleton without them.
-_THAI_MARKS = re.compile("[\u0e31\u0e34-\u0e3a\u0e47-\u0e4e]")
-_HEDGE_LABEL = re.compile(r"การปองกนความเสยง(?:\s*\(?FX\)?)?\s*:?\s+(?!จาก)(\S.*)$", re.M)
+# Some fonts encode the marks as private-use characters (\uf706, \uf70a), and some AMCs space
+# the letters out ("การป อ งก น ความเส  ย งด า น FX"), so 1–2 spaces between Thai letters are dropped.
+_THAI_MARKS = re.compile("[\u0e31\u0e34-\u0e3a\u0e47-\u0e4e\uf700-\uf71f]")
+_THAI_GAP = re.compile(r"(?<=[\u0e01-\u0e5b])[ \t]{1,2}(?=[\u0e01-\u0e5b])")
+_HEDGE_LABEL = re.compile(r"การปองกนความเสยง(?:ดาน)?(?:\s*\(?FX\)?)?\s*:?\s+(?!จาก)(\S.*)$", re.M)
 _HEDGE_VALUES = (("unhedged", re.compile(r"^ไมปองกน|unhedged", re.I)),
                  ("full", re.compile(r"^(?:ปองกน)?ทงหมด|fully", re.I)),
                  ("dynamic", re.compile(r"ดลย?พน|dynamic", re.I)),
@@ -220,7 +223,7 @@ def parse_fx_hedge_policy(text: str) -> str | None:
     None when absent or when classes print different policies.
     """
     found = set()
-    for m in _HEDGE_LABEL.finditer(_THAI_MARKS.sub("", text)):
+    for m in _HEDGE_LABEL.finditer(_THAI_GAP.sub("", _THAI_MARKS.sub("", text))):
         value = m.group(1)
         for name, rx in _HEDGE_VALUES:
             if rx.search(value[:40]):
