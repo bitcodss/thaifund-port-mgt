@@ -3,7 +3,7 @@ from app.models.portfolio import Portfolio
 from app.models.fund import Fund, NavHistory, Dividend
 from app.models.transaction import Transaction, TransactionType, TaxScheme
 from app.models.tax_lot import TaxLot, LotConsumption, TaxSchemeRule, SyncJob
-from app.models.market import FundFactsheet, FundProxy, NewsItem, NewsDigest
+from app.models.market import FundFactsheet, FundProxy, NewsDigest, NewsItem, PeerProfile
 
 __all__ = [
     "User", "UserRole",

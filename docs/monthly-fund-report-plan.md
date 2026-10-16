@@ -59,6 +59,18 @@ numbers computed by code, poorly performing funds first. Local Ollama only.
 - FX: hedge policy from SEC profile `exchange_rate_protection_policy` (store for all funds);
   FX effect uses the ACTUAL hedge ratio from the factsheet ("FX Hedging xx%") when present,
   otherwise it is shown as an estimate — never silently assume 0% or 100%.
+- Uncategorised foreign-equity funds (~35–53, mostly ONE / LH factsheets that print no
+  category): the LLM infers an AIMC category from the 44 report categories only (never
+  "Miscellaneous"), using master fund + investment policy (SEC profile) and benchmark (SEC
+  factsheet data); stored as `inferred`, never mixed with parsed categories.
+- Dedup: one peer per master fund — master ISIN first (70% of peers), normalised master name
+  only as fallback (21%), one per project for direct-stock funds (9%).
+- Representative NAV: one main retail share class per project (no institutional or
+  SSF/RMF/ThaiESG duplicates — fees differ). A deduped master's return = MEDIAN of its
+  feeders' returns in the SAME hedge group as the fund being compared; if no feeder shares
+  the hedge group, use all and label it "mixed hedge".
+- Chunk 4 also reports "vs other feeders of the same master" as its own metric — the direct
+  fee / tracking comparison, and the basis for switching to a cheaper fund holding the same thing.
 - Flags: 1M return < −2σ (own history), 3M < −2σ of 3M, peer percentile < 25 two months
   running, P&L since entry ≤ −10%.
 

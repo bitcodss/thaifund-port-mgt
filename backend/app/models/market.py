@@ -106,3 +106,31 @@ class FundFactsheet(Base):
     aimc_parsed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     scan_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PeerProfile(Base):
+    """
+    Per SEC project: what it is compared against. Effective AIMC category (parsed from the
+    factsheet, or LLM-inferred when the factsheet prints none), fixed-list peer theme,
+    passive / ESG flags, master key (one peer per master), representative retail share
+    class and its FX-hedge group. theme_source="manual" is an admin override — never
+    replaced by sync.
+    """
+    __tablename__ = "peer_profiles"
+
+    sec_proj_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    aimc_category: Mapped[str | None] = mapped_column(String(150), nullable=True, index=True)
+    aimc_source: Mapped[str | None] = mapped_column(String(10), nullable=True)      # parsed|inferred
+    aimc_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    peer_theme: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
+    theme_source: Mapped[str | None] = mapped_column(String(10), nullable=True)     # fixed|ai|manual
+    theme_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_passive: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    is_esg: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    master_key_kind: Mapped[str | None] = mapped_column(String(10), nullable=True)  # isin|name
+    master_key: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+    representative_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    hedge_group: Mapped[str | None] = mapped_column(String(12), nullable=True)      # unhedged|full|dynamic|partial|domestic|unknown
+    input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

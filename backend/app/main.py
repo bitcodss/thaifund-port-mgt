@@ -12,9 +12,10 @@ from app.api import auth, users, portfolios, transactions
 from app.api import funds as funds_router_module
 from app.api import sync as sync_router_module
 from app.api import analytics as analytics_router_module
+from app.api import peers as peers_router_module
 from app.database import AsyncSessionLocal
 from app.models.fund import Fund, NavHistory
-from app.services import factsheet_service, fund_category_service, news_service, proxy_service, sync_service
+from app.services import factsheet_service, fund_category_service, news_service, peer_service, proxy_service, sync_service
 from app.services.clock import today_ict
 from app.services.portfolio_service import clear_all_cache
 
@@ -121,6 +122,16 @@ async def _weekly_news_digests():
             logger.exception("Scheduled news digests failed")
 
 
+async def _weekly_peer_profiles():
+    """Sunday 03:00 ICT: refresh peer profiles (LLM only for new / changed funds)."""
+    async with AsyncSessionLocal() as db:
+        try:
+            result = await peer_service.build_peer_profiles(db)
+            logger.info("Scheduled peer profiles: %s", {k: v for k, v in result.items() if k != "errors"})
+        except Exception:
+            logger.exception("Scheduled peer profiles failed")
+
+
 async def _daily_dividend_sync():
     """Runs daily at 13:30 UTC (20:30 ICT)."""
     async with AsyncSessionLocal() as db:
@@ -155,6 +166,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_daily_metadata_sync, CronTrigger(hour=0, minute=0, timezone="Asia/Bangkok"))
     scheduler.add_job(_daily_dividend_sync, CronTrigger(hour=13, minute=30))
     scheduler.add_job(_collect_news, CronTrigger(hour="*/2", minute=10, timezone="Asia/Bangkok"))
+    scheduler.add_job(_weekly_peer_profiles, CronTrigger(day_of_week="sun", hour=3, minute=0, timezone="Asia/Bangkok"))
     scheduler.add_job(_weekly_news_digests, CronTrigger(day_of_week="mon", hour=6, minute=0, timezone="Asia/Bangkok"))
     scheduler.start()
     yield
@@ -185,6 +197,7 @@ app.include_router(transactions.lots_router, prefix=API_PREFIX)
 app.include_router(funds_router_module.router, prefix=API_PREFIX)
 app.include_router(sync_router_module.router, prefix=API_PREFIX)
 app.include_router(analytics_router_module.router, prefix=API_PREFIX)
+app.include_router(peers_router_module.router, prefix=API_PREFIX)
 
 
 @app.get("/health")

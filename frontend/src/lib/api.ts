@@ -114,6 +114,10 @@ export const api = {
     request<FundPerformance>("GET", `/funds/${fundCode}/performance${sinceDate ? `?since_date=${sinceDate}` : ""}`),
   getFund: (fundCode: string) => request<FundDetail>("GET", `/funds/${encodeURIComponent(fundCode)}`),
   getCategoryOptions: () => request<CategoryOptions>("GET", "/funds/category-options"),
+  getHeldPeerGroups: () => request<PeerGroup[]>("GET", "/peers/held"),
+  getPeerThemes: () => request<Record<string, string[]>>("GET", "/peers/themes"),
+  setPeerTheme: (projId: string, theme: string | null) =>
+    request<PeerGroup>("PUT", `/peers/${encodeURIComponent(projId)}/theme`, { theme }),
   getFundProxies: (fundCode: string) =>
     request<FundProxy[]>("GET", `/funds/${encodeURIComponent(fundCode)}/proxies`),
   // Admin: manual category override, or { category_source: "ai" } to hand back to the classifier
@@ -315,6 +319,38 @@ export interface FundDetail {
   fx_hedge: string | null;
   sec_risk_spectrum: number | null;
   top_holdings: { name: string; pct: number | null }[] | null;
+}
+
+export interface PeerFund {
+  sec_proj_id: string;
+  fund_code: string | null;
+  representative_code: string | null;
+  hedge_group: string | null;
+  is_passive: boolean | null;
+  is_esg: boolean | null;
+  peer_theme: string | null;
+  aimc_source: string | null;
+  is_self: boolean;
+}
+
+export interface PeerMaster {
+  master_key: string | null;
+  master_key_kind: "isin" | "name" | null;
+  funds: PeerFund[];
+}
+
+export interface PeerGroup {
+  sec_proj_id: string;
+  held_codes?: string[];
+  aimc_category: string | null;
+  aimc_source?: "parsed" | "inferred" | null;
+  aimc_reason?: string | null;
+  peer_theme?: string | null;
+  theme_source?: "fixed" | "ai" | "manual" | null;
+  theme_reason?: string | null;
+  basis?: "theme" | "category";
+  theme_masters?: number;
+  masters?: PeerMaster[];
 }
 
 export interface FundProxy {
