@@ -122,12 +122,19 @@ async def set_peer_theme(proj_id: str, body: ThemeOverride, db: AsyncSession = D
     prof = await db.get(PeerProfile, proj_id)
     if prof is None:
         raise HTTPException(status_code=404, detail="No peer profile for this project")
-    if body.theme is None:
-        prof.theme_source, prof.input_hash = None, None      # next build re-classifies
-    else:
-        allowed = themes_for(prof.aimc_category)
-        if allowed is None or body.theme not in allowed:
-            raise HTTPException(status_code=422, detail=f"theme must be one of {allowed} for {prof.aimc_category}")
-        prof.peer_theme, prof.theme_source, prof.theme_reason = body.theme, "manual", "Set manually by admin"
+    allowed = themes_for(prof.aimc_category)
+    if body.theme is not None and (allowed is None or body.theme not in allowed):
+        raise HTTPException(status_code=422, detail=f"theme must be one of {allowed} for {prof.aimc_category}")
+    # one theme per master: the override (or its removal) applies to every feeder of this master
+    members = [prof]
+    if prof.master_key:
+        members = (await db.execute(select(PeerProfile).where(
+            PeerProfile.master_key == prof.master_key, PeerProfile.aimc_category == prof.aimc_category))).scalars().all()
+    for m in members:
+        if body.theme is None:
+            m.theme_source, m.theme_status, m.theme_input_hash = None, None, None   # re-classified next build
+        else:
+            m.peer_theme, m.theme_source, m.theme_status = body.theme, "manual", "manual"
+            m.theme_reason = "Set manually by admin (applies to all feeders of this master)"
     await db.commit()
     return await peer_service.peer_group(db, proj_id)

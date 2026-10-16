@@ -12,12 +12,12 @@ class LlmError(Exception):
     pass
 
 
-async def generate_json(prompt: str, schema: dict, timeout: float = 180) -> dict:
+async def generate_json(prompt: str, schema: dict, timeout: float = 180, model: str | None = None) -> dict:
     """Return the model's JSON answer constrained by `schema`; raise LlmError on any failure."""
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(f"{settings.OLLAMA_URL}/api/generate", json={
-                "model": settings.OLLAMA_MODEL,
+                "model": model or settings.OLLAMA_MODEL,
                 "prompt": prompt,
                 "stream": False,
                 "think": False,          # thinking mode takes minutes for no gain on these tasks

@@ -28,6 +28,8 @@ class Settings(BaseSettings):
 
     OLLAMA_URL: str = "http://host.docker.internal:11434"
     OLLAMA_MODEL: str = "gemma4:26b"
+    # Second, independent model for peer-theme cross-checks (agreement → automatic)
+    OLLAMA_REVIEW_MODEL: str = "scb10x/typhoon2.5-qwen3-30b-a3b:latest"
 
     FINNOMENA_EMAIL: str = ""
     FINNOMENA_PASSWORD: str = ""

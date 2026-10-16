@@ -18,7 +18,8 @@ THEMES_BY_CATEGORY: dict[str, list[str]] = {
     "Greater China Equity": ["China Tech & Innovation", "All-China Broad", "Hong Kong / H-Shares",
                              "China Consumer"],
     "Japan Equity": ["Broad / Index", "Growth", "Value / Dividend", "Small Cap"],
-    "Asia Pacific Ex Japan": ["Broad", "Growth", "Dividend / Income"],
+    # "Single Country": one-market funds (e.g. MSCI Korea) — kept out of the Broad group
+    "Asia Pacific Ex Japan": ["Broad", "Growth", "Dividend / Income", "Single Country"],
     "Emerging Market": ["Broad EM", "EM Asia", "EM ex-China"],
 }
 

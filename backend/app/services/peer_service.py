@@ -121,31 +121,20 @@ def hedge_group(policy: str | None, invest_country_flag: str | None = None) -> s
 
 _THEME_PROMPT = """Classify this Thai mutual fund into exactly one peer theme within its AIMC category "{category}".
 Allowed themes: {themes}
-Also say whether it is an ESG / sustainability fund (is_esg).
-Rules: choose by what the fund (or its master fund) actually invests in. A passive index fund still gets the theme of its index.
-Fund (JSON):
-{data}"""
-
-_AIMC_PROMPT = """This Thai mutual fund's factsheet prints no AIMC category. Choose the single AIMC category it belongs to.
-Categories (name: what belongs there):
-{categories}
-Rules:
-- Decide by what the fund or its master fund actually holds and where.
-- Use a sector category ONLY when the mandate is that sector. Broad or multi-theme funds go to their region's category.
-- Thai equity funds (including Thai ESG / ThaiESG / ThaiESGX funds) are Thai categories, never property or freehold.
+Rules: choose by what the fund (or its master fund) actually invests in. A passive index fund still gets the
+theme of its index. A fund investing in a single country gets "Single Country" when that theme is allowed.
 Fund (JSON):
 {data}"""
 
 
-async def classify_theme(category: str, themes: list[str], data: dict) -> dict:
+async def classify_theme(category: str, themes: list[str], data: dict, model: str | None = None) -> str:
     out = await generate_json(
         _THEME_PROMPT.format(category=category, themes=", ".join(themes), data=json.dumps(data, ensure_ascii=False)),
-        {"type": "object", "properties": {"theme": {"type": "string", "enum": themes},
-                                           "is_esg": {"type": "boolean"}, "reason": {"type": "string"}},
-         "required": ["theme", "is_esg", "reason"]})
+        {"type": "object", "properties": {"theme": {"type": "string", "enum": themes}, "reason": {"type": "string"}},
+         "required": ["theme", "reason"]}, model=model)
     if out.get("theme") not in themes:
         raise LlmError(f"theme outside the allowed list: {out}")
-    return out
+    return out["theme"]
 
 
 async def infer_aimc_category(data: dict) -> dict:
@@ -166,10 +155,10 @@ def _policy_text(profile: dict) -> str:
 
 async def build_peer_profiles(db: AsyncSession, proj_ids: set[str] | None = None, force: bool = False) -> dict:
     """
-    Build / refresh peer profiles for active projects with a parsed factsheet (default: all).
-    LLM work only where needed: an inferred AIMC category for uncategorised FOREIGN EQUITY
-    funds, and a theme for categories that have a theme list. Re-runs skip projects whose
-    inputs are unchanged; manual theme overrides are kept.
+    Pass 1 (per project): representative class, hedge group, passive, master key, ESG (SEC "SRI"
+    designation), effective AIMC category (parsed / same-master inherited / LLM-inferred for
+    uncategorised foreign equity; manual kept) and the classifier input.
+    Pass 2: themes per master (assign_themes). Manual overrides are never replaced.
     """
     key = settings.SEC_API_KEY
     q = select(FundFactsheet).where(FundFactsheet.scan_status == "ok")
@@ -185,7 +174,7 @@ async def build_peer_profiles(db: AsyncSession, proj_ids: set[str] | None = None
     db.add(job)
     await db.commit()
 
-    counts = {"built": 0, "unchanged": 0, "inferred": 0, "themed": 0, "error": 0}
+    counts = {"built": 0, "unchanged": 0, "inferred": 0, "error": 0}
     errors: list[str] = []
     for n, proj_id in enumerate(todo, 1):
         fs_row = factsheets[proj_id]
@@ -194,6 +183,7 @@ async def build_peer_profiles(db: AsyncSession, proj_ids: set[str] | None = None
             bench = " / ".join(dict.fromkeys(
                 (b.get("benchmark") or "").strip() for b in await sec_api.get_benchmarks(key, proj_id)
                 if b.get("benchmark")))[:600]
+            specs = {sp.get("spec_code") for sp in await sec_api.get_specifications(key, proj_id)}
         except SecApiError as e:
             counts["error"] += 1
             errors.append(f"{proj_id}: {e}")
@@ -219,8 +209,10 @@ async def build_peer_profiles(db: AsyncSession, proj_ids: set[str] | None = None
         prof.representative_code = rep
         prof.hedge_group = hedge_group(rep_row.get("exchange_rate_protection_policy"), base.get("invest_country_flag"))
         prof.is_passive = base.get("management_style") in _PASSIVE_STYLES
+        prof.is_esg = "SRI" in specs              # SEC's official sustainable-fund designation only
         mk = master_key(fs_row.master_isin, base.get("feederfund_master_fund"))
         prof.master_key_kind, prof.master_key = mk if mk else (None, None)
+        prof.classifier_input = data
 
         if prof.input_hash == h and not force:
             counts["unchanged"] += 1
@@ -238,9 +230,9 @@ async def build_peer_profiles(db: AsyncSession, proj_ids: set[str] | None = None
                 prof.aimc_category, prof.aimc_source, prof.aimc_reason = fs_row.aimc_category, "parsed", None
             elif siblings:
                 # other Thai feeders of the same master print a category — inherit the majority
-                cat, n = siblings.most_common(1)[0]
+                cat, c = siblings.most_common(1)[0]
                 prof.aimc_category, prof.aimc_source = cat, "inferred"
-                prof.aimc_reason = f"Same master fund as {n} fund(s) whose factsheets say {cat}"
+                prof.aimc_reason = f"Same master fund as {c} fund(s) whose factsheets say {cat}"
                 counts["inferred"] += 1
             elif base.get("policy_desc") == "ตราสารทุน" and base.get("invest_country_flag") in ("1", "4"):
                 out = await infer_aimc_category(data)
@@ -248,23 +240,14 @@ async def build_peer_profiles(db: AsyncSession, proj_ids: set[str] | None = None
                 counts["inferred"] += 1
             else:
                 prof.aimc_category, prof.aimc_source, prof.aimc_reason = None, None, None
-
-            themes = themes_for(prof.aimc_category)
-            if prof.theme_source == "manual" and (themes is None or prof.peer_theme in themes):
-                pass                                           # admin override survives sync
-            elif themes is None:
-                prof.peer_theme, prof.theme_source, prof.theme_reason = prof.aimc_category, "fixed", None
-                prof.is_esg = bool(re.search(r"\bESG\b|sustainab|ยั่งยืน", f"{data['name_en']} {data['policy']}", re.I))
-            else:
-                out = await classify_theme(prof.aimc_category, themes, data)
-                prof.peer_theme, prof.theme_source, prof.theme_reason = out["theme"], "ai", out["reason"]
-                prof.is_esg = bool(out["is_esg"])
-                counts["themed"] += 1
         except LlmError as e:
             counts["error"] += 1
             errors.append(f"{proj_id}: {e}")
-            await db.commit()                                  # keep deterministic fields; retry LLM next run
+            await db.commit()                                  # keep deterministic fields; retry next run
             continue
+        if themes_for(prof.aimc_category) is None and prof.theme_source != "manual":
+            prof.peer_theme, prof.theme_source, prof.theme_status, prof.theme_alt = \
+                prof.aimc_category, "fixed", "fixed", None
         prof.input_hash, prof.model, prof.classified_at = h, settings.OLLAMA_MODEL, datetime.now(timezone.utc)
         counts["built"] += 1
         if n % 50 == 0:
@@ -272,13 +255,78 @@ async def build_peer_profiles(db: AsyncSession, proj_ids: set[str] | None = None
                 " ".join(f"{k}:{v}" for k, v in counts.items())
         await db.commit()
 
+    theme_counts = await assign_themes(db, force=force)
     job = await db.get(SyncJob, job.id)
     job.completed_at = datetime.now(timezone.utc)
-    job.status = "error" if errors else "success"
+    job.status = "error" if errors or theme_counts["errors"] else "success"
     job.error_message = (f"{len(todo)}/{len(todo)} " + " ".join(f"{k}:{v}" for k, v in counts.items())
-                         + (f" | {'; '.join(errors[:3])}" if errors else ""))
+                         + " themes " + " ".join(f"{k}:{v}" for k, v in theme_counts.items() if k != "errors")
+                         + (f" | {'; '.join((errors + theme_counts['errors'])[:3])}" if errors or theme_counts["errors"] else ""))
     await db.commit()
-    return {"projects": len(todo), **counts, "errors": errors}
+    return {"projects": len(todo), **counts, "themes": {k: v for k, v in theme_counts.items() if k != "errors"},
+            "errors": errors + theme_counts["errors"]}
+
+
+async def assign_themes(db: AsyncSession, force: bool = False) -> dict:
+    """
+    One theme per master fund (all its Thai feeders share it), classified by two models.
+    Both agree → status "agreed" (automatic); they differ → "review" (still counted, labelled
+    "theme unreviewed"). A manual theme on any feeder applies to every feeder of that master.
+    Models run one after the other (all primary calls, then all review calls) so two ~20 GB
+    models aren't swapped in and out of memory per fund.
+    """
+    rows = (await db.execute(select(PeerProfile).where(PeerProfile.aimc_category.isnot(None)))).scalars().all()
+    groups: dict[tuple[str, str], list[PeerProfile]] = {}
+    for p in rows:
+        if themes_for(p.aimc_category) is not None:
+            groups.setdefault((p.aimc_category, _member_key(p)), []).append(p)
+
+    counts = {"masters": len(groups), "manual": 0, "unchanged": 0, "agreed": 0, "review": 0}
+    errors: list[str] = []
+    todo: list[tuple[tuple[str, str], list[PeerProfile], dict, str]] = []
+    for gkey, members in groups.items():
+        manual = next((m for m in members if m.theme_source == "manual" and m.peer_theme in themes_for(gkey[0])), None)
+        if manual:
+            for m in members:
+                m.peer_theme, m.theme_source, m.theme_status = manual.peer_theme, "manual", "manual"
+            counts["manual"] += 1
+            continue
+        rep = max(members, key=lambda m: (bool((m.classifier_input or {}).get("top_holdings")), m.sec_proj_id))
+        data = rep.classifier_input or {}
+        h = hashlib.sha256(json.dumps([gkey[0], data], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        if not force and all(m.theme_input_hash == h and m.theme_status in ("agreed", "review") for m in members):
+            counts["unchanged"] += 1
+            continue
+        todo.append((gkey, members, data, h))
+    await db.commit()
+
+    primary: dict[tuple[str, str], str] = {}
+    for gkey, members, data, h in todo:
+        try:
+            primary[gkey] = await classify_theme(gkey[0], themes_for(gkey[0]), data)
+        except LlmError as e:
+            errors.append(f"{gkey}: {e}")
+    review: dict[tuple[str, str], str] = {}
+    for gkey, members, data, h in todo:
+        if gkey not in primary:
+            continue
+        try:
+            review[gkey] = await classify_theme(gkey[0], themes_for(gkey[0]), data, model=settings.OLLAMA_REVIEW_MODEL)
+        except LlmError as e:
+            errors.append(f"{gkey} (review model): {e}")
+
+    for gkey, members, data, h in todo:
+        if gkey not in primary or gkey not in review:
+            continue
+        status = "agreed" if primary[gkey] == review[gkey] else "review"
+        counts[status] += 1
+        for m in members:
+            m.peer_theme, m.theme_alt, m.theme_status = primary[gkey], review[gkey], status
+            m.theme_source, m.theme_input_hash = "ai", h
+            m.theme_reason = None if status == "agreed" else \
+                f"Models disagree: {settings.OLLAMA_MODEL} → {primary[gkey]}, {settings.OLLAMA_REVIEW_MODEL} → {review[gkey]}"
+    await db.commit()
+    return {**counts, "errors": errors}
 
 
 # ── peer groups ───────────────────────────────────────────────────────────────
@@ -318,12 +366,15 @@ async def peer_group(db: AsyncSession, proj_id: str) -> dict | None:
         g["funds"].append({"sec_proj_id": p.sec_proj_id, "fund_code": names.get(p.sec_proj_id),
                            "representative_code": p.representative_code, "hedge_group": p.hedge_group,
                            "is_passive": p.is_passive, "is_esg": p.is_esg, "peer_theme": p.peer_theme,
-                           "aimc_source": p.aimc_source, "is_self": p.sec_proj_id == proj_id})
+                           "aimc_source": p.aimc_source, "theme_status": p.theme_status,
+                           "is_self": p.sec_proj_id == proj_id})
     return {
         "sec_proj_id": proj_id, "aimc_category": me.aimc_category, "aimc_source": me.aimc_source,
         "aimc_reason": me.aimc_reason, "peer_theme": me.peer_theme, "theme_source": me.theme_source,
-        "theme_reason": me.theme_reason, "basis": basis, "theme_masters": len(theme_masters),
+        "theme_reason": me.theme_reason, "theme_status": me.theme_status, "theme_alt": me.theme_alt, "basis": basis, "theme_masters": len(theme_masters),
         "pending_excluded": len([p for p in pending if basis == "category" or p.peer_theme == me.peer_theme]),
+        # "theme unreviewed": peers (or this fund) whose theme the two models disagreed on
+        "theme_unreviewed": len([p for p in members if p.theme_status == "review"]),
         "masters": sorted(grouped.values(), key=lambda g: (not any(f["is_self"] for f in g["funds"]),
                                                              -len(g["funds"]), g["master_key"] or "")),
     }

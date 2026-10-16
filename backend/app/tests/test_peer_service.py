@@ -102,15 +102,17 @@ async def _seed(db, proj, cat, isin=None, scope="fund_units"):
     await db.commit()
 
 
-async def _run(db, profiles, theme=None, infer=None, force=False):
-    theme = theme or AsyncMock(return_value={"theme": "Semiconductor", "is_esg": False, "reason": "chips"})
+async def _run(db, profiles, theme=None, infer=None, force=False, specs=None):
+    theme = theme or AsyncMock(return_value="Semiconductor")
     infer = infer or AsyncMock(return_value={"category": "Technology Equity", "reason": "AI ETF"})
     with patch("app.services.sec_api.get_fund_profiles", new=AsyncMock(side_effect=lambda k, p: profiles[p])), \
             patch("app.services.sec_api.get_benchmarks", new=AsyncMock(return_value=[{"benchmark": "SOX"}])), \
+            patch("app.services.sec_api.get_specifications",
+                  new=AsyncMock(side_effect=lambda k, p: [{"spec_code": c} for c in (specs or {}).get(p, [])])), \
             patch("app.services.peer_service.classify_theme", new=theme), \
             patch("app.services.peer_service.infer_aimc_category", new=infer), \
             patch("app.services.peer_service.settings") as st:
-        st.SEC_API_KEY, st.OLLAMA_MODEL = "k", "test-model"
+        st.SEC_API_KEY, st.OLLAMA_MODEL, st.OLLAMA_REVIEW_MODEL = "k", "test-model", "review-model"
         return await ps.build_peer_profiles(db, force=force), theme, infer
 
 
@@ -121,8 +123,8 @@ class TestBuildPeerProfiles:
         await _seed(db, "P1", "Technology Equity", isin="IE00BMC38736")
         r, theme, infer = await _run(db, {"P1": _profile("P1", "SEMI", master="VanEck Semiconductor UCITS ETF")})
         p = await db.get(PeerProfile, "P1")
-        assert (p.aimc_category, p.aimc_source, p.peer_theme, p.theme_source) == \
-            ("Technology Equity", "parsed", "Semiconductor", "ai")
+        assert (p.aimc_category, p.aimc_source, p.peer_theme, p.theme_source, p.theme_status) == \
+            ("Technology Equity", "parsed", "Semiconductor", "ai", "agreed")
         assert (p.master_key_kind, p.master_key, p.is_passive, p.hedge_group) == ("isin", "IE00BMC38736", True, "unhedged")
         infer.assert_not_awaited()
 
@@ -133,7 +135,7 @@ class TestBuildPeerProfiles:
         p = await db.get(PeerProfile, "P2")
         assert (p.aimc_category, p.aimc_source) == ("Technology Equity", "inferred")
         assert p.master_key_kind == "name"                         # no ISIN → normalised master name
-        assert r["inferred"] == 1 and r["themed"] == 1
+        assert r["inferred"] == 1 and r["themes"]["agreed"] == 1
 
     @pytest.mark.asyncio
     async def test_domestic_or_non_equity_without_category_gets_no_llm(self, db):
@@ -159,7 +161,7 @@ class TestBuildPeerProfiles:
         p.peer_theme, p.theme_source = "AI", "manual"
         await db.commit()
         r, theme, _ = await _run(db, prof)
-        assert r["unchanged"] == 1
+        assert r["unchanged"] == 1 and r["themes"]["manual"] == 1
         theme.assert_not_awaited()
         r, theme, _ = await _run(db, prof, force=True)
         theme.assert_not_awaited()                                   # manual override survives force
@@ -171,9 +173,9 @@ class TestBuildPeerProfiles:
         prof = {"P1": _profile("P1", "SEMI")}
         r, _, _ = await _run(db, prof, theme=AsyncMock(side_effect=LlmError("down")))
         p = await db.get(PeerProfile, "P1")
-        assert r["error"] == 1 and p.master_key == "IE00BMC38736" and p.input_hash is None
+        assert r["errors"] and p.master_key == "IE00BMC38736" and p.theme_status is None
         r, theme, _ = await _run(db, prof)
-        theme.assert_awaited_once()                                  # retried next run
+        assert theme.await_count == 2                                # retried next run (both models)
 
 
 # ── peer groups + API ─────────────────────────────────────────────────────────
@@ -274,8 +276,7 @@ class TestInferenceImprovements:
         await _prof(db, "SIB2", "Global Equity", "Growth", master="IE00SAME")
         await db.commit()
         await _seed(db, "NEW", None, isin="IE00SAME")
-        r, theme, infer = await _run(db, {"NEW": _profile("NEW", "ONE-DISC")},
-                                     theme=AsyncMock(return_value={"theme": "Growth", "is_esg": False, "reason": "x"}))
+        r, theme, infer = await _run(db, {"NEW": _profile("NEW", "ONE-DISC")}, theme=AsyncMock(return_value="Growth"))
         p = await db.get(PeerProfile, "NEW")
         assert (p.aimc_category, p.aimc_source) == ("Global Equity", "inferred")
         assert "Same master fund as 2" in p.aimc_reason
@@ -340,3 +341,49 @@ class TestPendingInferred:
         client, _ = admin_client
         cats = client.get("/api/v1/peers/categories").json()
         assert len(cats) == 44 and "Miscellaneous" not in cats
+
+
+class TestThemesPerMasterTwoModels:
+
+    @pytest.mark.asyncio
+    async def test_one_classification_per_master_and_disagreement_goes_to_review(self, db):
+        await _seed(db, "F1", "Technology Equity", isin="IE00SEMI")
+        await _seed(db, "F2", "Technology Equity", isin="IE00SEMI")          # second feeder, same master
+        await _seed(db, "F3", "Technology Equity", isin="IE00AIAI")
+        answers = {("test", "IE00SEMI"): "Semiconductor", ("review", "IE00SEMI"): "Semiconductor",
+                   ("test", "IE00AIAI"): "AI", ("review", "IE00AIAI"): "General Technology"}
+
+        async def fake(category, themes, data, model=None):
+            isin = "IE00SEMI" if data["fund"] in ("F1", "F2") else "IE00AIAI"
+            return answers[("review" if model else "test", isin)]
+        profiles = {p: _profile(p, p) for p in ("F1", "F2", "F3")}
+        r, theme, _ = await _run(db, profiles, theme=AsyncMock(side_effect=fake))
+        assert theme.await_count == 4                                    # 2 masters × 2 models, not 3 funds × 2
+        assert r["themes"]["agreed"] == 1 and r["themes"]["review"] == 1
+        f1, f2, f3 = [await db.get(PeerProfile, p) for p in ("F1", "F2", "F3")]
+        assert (f1.peer_theme, f1.theme_status) == (f2.peer_theme, f2.theme_status) == ("Semiconductor", "agreed")
+        assert (f3.peer_theme, f3.theme_alt, f3.theme_status) == ("AI", "General Technology", "review")
+
+    @pytest.mark.asyncio
+    async def test_is_esg_comes_only_from_sec_sri_designation(self, db):
+        await _seed(db, "E1", "Global Equity")
+        await _seed(db, "E2", "Global Equity")
+        profiles = {"E1": _profile("E1", "SUSTAINABLE GROWTH"), "E2": _profile("E2", "SCBSEMI")}
+        await _run(db, profiles, theme=AsyncMock(return_value="Growth"), specs={"E2": ["SRI", "FED"]})
+        assert (await db.get(PeerProfile, "E1")).is_esg is False         # sustainable-sounding name ≠ ESG
+        assert (await db.get(PeerProfile, "E2")).is_esg is True
+
+    @pytest.mark.asyncio
+    async def test_manual_theme_applies_to_every_feeder_of_the_master(self, db, admin_client):
+        client, _ = admin_client
+        for p in ("G1", "G2"):
+            db.add(Fund(fund_code=f"C-{p}", sec_proj_id=p, fund_status="RG"))
+            db.add(PeerProfile(sec_proj_id=p, aimc_category="Global Equity", aimc_source="parsed",
+                               peer_theme="Value", theme_source="ai", theme_status="agreed",
+                               master_key="IE00INFRA", master_key_kind="isin"))
+        await db.commit()
+        client.put("/api/v1/peers/G1/theme", json={"theme": "Quality / Dividend"})
+        for p in ("G1", "G2"):
+            prof = await db.get(PeerProfile, p)
+            await db.refresh(prof)
+            assert (prof.peer_theme, prof.theme_status) == ("Quality / Dividend", "manual")

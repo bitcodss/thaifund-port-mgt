@@ -199,6 +199,11 @@ async def get_top5_holdings(key: str, proj_id: str) -> list[dict]:
     return await _get_items(key, "/factsheet/top5-holdings", {"proj_id": proj_id, "latest": "true"})
 
 
+async def get_specifications(key: str, proj_id: str) -> list[dict]:
+    """GET /general-info/specifications → spec_code per class (e.g. "SRI" = SEC sustainable fund)."""
+    return await _get_items(key, "/general-info/specifications", {"proj_id": proj_id})
+
+
 async def get_risk_spectrum(key: str, proj_id: str) -> list[dict]:
     """GET /factsheet/risk-spectrum (latest factsheet) → rows with risk_spectrum e.g. "RS6"."""
     return await _get_items(key, "/factsheet/risk-spectrum", {"proj_id": proj_id, "latest": "true"})

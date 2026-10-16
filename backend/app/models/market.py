@@ -134,3 +134,9 @@ class PeerProfile(Base):
     input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Theme is classified once per master by two models: agreed → automatic; they differ → "review"
+    # (still counted in peer stats, labelled "theme unreviewed"). theme_alt = second model's answer.
+    theme_alt: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    theme_status: Mapped[str | None] = mapped_column(String(12), nullable=True)   # agreed|review|manual|fixed
+    theme_input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    classifier_input: Mapped[dict | None] = mapped_column(JSON, nullable=True)
