@@ -15,9 +15,14 @@ from app.models.portfolio import Portfolio
 from app.models.tax_lot import TaxLot
 from app.models.user import User, UserRole
 from app.services import peer_service
+from app.services.peer_service import INFERABLE_CATEGORIES
 from app.services.peer_taxonomy import THEMES_BY_CATEGORY, themes_for
 
 router = APIRouter(prefix="/peers", tags=["peers"])
+
+
+class CategoryOverride(BaseModel):
+    category: str | None   # None → back to parsed / inferred on the next build
 
 
 class ThemeOverride(BaseModel):
@@ -47,6 +52,28 @@ async def held_peer_groups(db: AsyncSession = Depends(get_db), user: User = Depe
         group = await peer_service.peer_group(db, proj_id)
         out.append({"held_codes": sorted(held[proj_id]), **(group or {"sec_proj_id": proj_id, "aimc_category": None})})
     return out
+
+
+@router.put("/{proj_id}/category")
+async def set_peer_category(proj_id: str, body: CategoryOverride, db: AsyncSession = Depends(get_db),
+                            _=Depends(require_admin)):
+    """Admin override for a fund's AIMC category (e.g. a wrong LLM inference) — kept across syncs."""
+    prof = await db.get(PeerProfile, proj_id)
+    if prof is None:
+        raise HTTPException(status_code=404, detail="No peer profile for this project")
+    if body.category is None:
+        prof.aimc_source, prof.input_hash = None, None        # next build re-derives it
+    else:
+        if body.category not in INFERABLE_CATEGORIES:
+            raise HTTPException(status_code=422, detail="category must be one of the 44 AIMC report categories")
+        prof.aimc_category, prof.aimc_source, prof.aimc_reason = body.category, "manual", "Set manually by admin"
+        allowed = themes_for(body.category)
+        if allowed is None:
+            prof.peer_theme, prof.theme_source = body.category, "fixed"
+        elif prof.peer_theme not in allowed:
+            prof.theme_source, prof.input_hash = None, None   # re-theme within the new category next build
+    await db.commit()
+    return await peer_service.peer_group(db, proj_id)
 
 
 @router.put("/{proj_id}/theme")

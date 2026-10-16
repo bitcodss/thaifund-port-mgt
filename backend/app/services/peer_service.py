@@ -24,7 +24,9 @@ from app.models.fund import Fund
 from app.models.market import FundFactsheet, PeerProfile
 from app.models.tax_lot import SyncJob
 from app.services import sec_api
-from app.services.aimc import AIMC_CATEGORIES
+from collections import Counter
+
+from app.services.aimc import AIMC_CATEGORIES, AIMC_DEFINITIONS
 from app.services.llm import LlmError, generate_json
 from app.services.peer_taxonomy import MIN_THEME_GROUP, themes_for
 from app.services.sec_api import SecApiError
@@ -125,8 +127,12 @@ Fund (JSON):
 {data}"""
 
 _AIMC_PROMPT = """This Thai mutual fund's factsheet prints no AIMC category. Choose the single AIMC category it belongs to.
-Allowed categories: {categories}
-Use what the fund (or its master fund) invests in and where.
+Categories (name: what belongs there):
+{categories}
+Rules:
+- Decide by what the fund or its master fund actually holds and where.
+- Use a sector category ONLY when the mandate is that sector. Broad or multi-theme funds go to their region's category.
+- Thai equity funds (including Thai ESG / ThaiESG / ThaiESGX funds) are Thai categories, never property or freehold.
 Fund (JSON):
 {data}"""
 
@@ -144,7 +150,8 @@ async def classify_theme(category: str, themes: list[str], data: dict) -> dict:
 
 async def infer_aimc_category(data: dict) -> dict:
     out = await generate_json(
-        _AIMC_PROMPT.format(categories=", ".join(INFERABLE_CATEGORIES), data=json.dumps(data, ensure_ascii=False)),
+        _AIMC_PROMPT.format(categories="\n".join(f"- {c}: {AIMC_DEFINITIONS[c]}" for c in INFERABLE_CATEGORIES),
+                            data=json.dumps(data, ensure_ascii=False)),
         {"type": "object", "properties": {"category": {"type": "string", "enum": INFERABLE_CATEGORIES},
                                            "reason": {"type": "string"}},
          "required": ["category", "reason"]})
@@ -220,8 +227,21 @@ async def build_peer_profiles(db: AsyncSession, proj_ids: set[str] | None = None
             await db.commit()
             continue
         try:
-            if fs_row.aimc_category:
+            siblings = Counter(c for (c,) in (await db.execute(
+                select(PeerProfile.aimc_category).where(PeerProfile.master_key == prof.master_key,
+                                                        PeerProfile.sec_proj_id != proj_id,
+                                                        PeerProfile.aimc_source == "parsed"))).all()) \
+                if prof.master_key else Counter()
+            if prof.aimc_source == "manual":
+                pass                                           # admin category override survives sync
+            elif fs_row.aimc_category:
                 prof.aimc_category, prof.aimc_source, prof.aimc_reason = fs_row.aimc_category, "parsed", None
+            elif siblings:
+                # other Thai feeders of the same master print a category — inherit the majority
+                cat, n = siblings.most_common(1)[0]
+                prof.aimc_category, prof.aimc_source = cat, "inferred"
+                prof.aimc_reason = f"Same master fund as {n} fund(s) whose factsheets say {cat}"
+                counts["inferred"] += 1
             elif base.get("policy_desc") == "ตราสารทุน" and base.get("invest_country_flag") in ("1", "4"):
                 out = await infer_aimc_category(data)
                 prof.aimc_category, prof.aimc_source, prof.aimc_reason = out["category"], "inferred", out["reason"]

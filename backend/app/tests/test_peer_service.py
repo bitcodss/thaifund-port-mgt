@@ -264,3 +264,47 @@ class TestPeersApi:
         p = await db.get(PeerProfile, "S0")
         await db.refresh(p)
         assert p.theme_source is None and p.input_hash is None          # re-classified next build
+
+
+class TestInferenceImprovements:
+
+    @pytest.mark.asyncio
+    async def test_inherits_category_from_same_master_siblings(self, db):
+        await _prof(db, "SIB1", "Global Equity", "Growth", master="IE00SAME")
+        await _prof(db, "SIB2", "Global Equity", "Growth", master="IE00SAME")
+        await db.commit()
+        await _seed(db, "NEW", None, isin="IE00SAME")
+        r, theme, infer = await _run(db, {"NEW": _profile("NEW", "ONE-DISC")},
+                                     theme=AsyncMock(return_value={"theme": "Growth", "is_esg": False, "reason": "x"}))
+        p = await db.get(PeerProfile, "NEW")
+        assert (p.aimc_category, p.aimc_source) == ("Global Equity", "inferred")
+        assert "Same master fund as 2" in p.aimc_reason
+        infer.assert_not_awaited()                                    # no LLM guess needed
+
+    @pytest.mark.asyncio
+    async def test_manual_category_survives_build(self, db):
+        await _seed(db, "P9", None)
+        db.add(PeerProfile(sec_proj_id="P9", aimc_category="Health Care", aimc_source="manual",
+                           peer_theme="Life Sciences & Biotech", theme_source="manual"))
+        await db.commit()
+        r, theme, infer = await _run(db, {"P9": _profile("P9", "SCBGENOME")}, force=True)
+        p = await db.get(PeerProfile, "P9")
+        assert (p.aimc_category, p.aimc_source, p.peer_theme) == ("Health Care", "manual", "Life Sciences & Biotech")
+        infer.assert_not_awaited()
+
+    def test_every_inferable_category_has_a_definition(self):
+        from app.services.aimc import AIMC_DEFINITIONS
+        assert set(AIMC_DEFINITIONS) == set(ps.INFERABLE_CATEGORIES)
+
+
+@pytest.mark.asyncio
+async def test_category_override_api(db, admin_client):
+    client, _ = admin_client
+    await _prof(db, "G1", "Global Equity - Alternative Energy", "Global Equity - Alternative Energy")
+    await db.commit()
+    assert client.put("/api/v1/peers/G1/category", json={"category": "Miscellaneous"}).status_code == 422
+    r = client.put("/api/v1/peers/G1/category", json={"category": "Health Care"}).json()
+    assert (r["aimc_category"], r["aimc_source"]) == ("Health Care", "manual")
+    p = await db.get(PeerProfile, "G1")
+    await db.refresh(p)
+    assert p.theme_source is None                                       # re-themed within Health Care next build
