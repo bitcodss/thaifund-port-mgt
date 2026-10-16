@@ -145,7 +145,8 @@ async def set_fund_proxies(
     if kind not in proxy_service.KINDS:
         raise HTTPException(status_code=422, detail=f"kind must be one of {proxy_service.KINDS}")
     proj_id = await _proj_id(fund_code, db)
-    return await proxy_service.set_manual(db, proj_id, kind, body.tickers, body.source_note, body.source_as_of)
+    return await proxy_service.set_manual(db, proj_id, kind, body.tickers, body.source_note,
+                                          body.source_as_of, body.weights)
 
 
 @router.get("/{fund_code}/news-digests", response_model=list[NewsDigestOut])

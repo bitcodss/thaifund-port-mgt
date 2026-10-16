@@ -25,6 +25,7 @@ import json
 import logging
 import re
 import uuid
+from decimal import Decimal
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import delete, select
@@ -190,23 +191,24 @@ async def validate(kind: str, ticker: str) -> tuple[bool, int | None]:
 async def news_from_holdings(fund: Fund, factsheet: FundFactsheet | None) -> tuple[list[dict], str | None]:
     """Verified news tickers from real holdings, or ([], why-not) when the route fails."""
     if holds_stocks_directly(fund):
-        names, source, scope = [h.get("name") for h in fund.top_holdings or []], "holding", "fund"
+        rows, source, scope = fund.top_holdings or [], "holding", "fund"
     elif factsheet and factsheet.holdings_scope in ("master", "fund") and factsheet.holdings:
-        names, source, scope = [r.get("name") for r in factsheet.holdings], "factsheet", factsheet.holdings_scope
+        rows, source, scope = factsheet.holdings, "factsheet", factsheet.holdings_scope
     elif factsheet and factsheet.holdings_scope == "fund_units":
         return [], "factsheet lists only fund/ETF units, no stock-level holdings"
     else:
         return [], "no stock-level holdings source (factsheet has no top-5 block)"
 
     out: list[dict] = []
-    for n in names[:5]:
-        q = await resolve_holding(n or "")
+    for h in rows[:5]:
+        n = h.get("name") or ""
+        q = await resolve_holding(n)
         if q and all(q["symbol"] != o["ticker"] for o in out):
             label = "master-fund top holding" if scope == "master" else "top holding"
             out.append({"ticker": q["symbol"], "label": q["name"] or n, "source": source,
-                        "reason": f"{label}: {n}", "valid": True})
+                        "reason": f"{label}: {n}", "valid": True, "weight": h.get("pct")})
     if len(out) < MIN_HOLDING_TICKERS:
-        return [], f"only {len(out)} of {len(names)} holdings resolved to tickers with Yahoo news"
+        return [], f"only {len(out)} of {len(rows)} holdings resolved to tickers with Yahoo news"
     return out, None
 
 
@@ -280,6 +282,7 @@ async def refresh_proxies(db: AsyncSession, proj_ids: set[str] | None = None, fo
                     sec_proj_id=proj_id, kind=kind, ticker=c["ticker"], label=(c["label"] or "")[:200] or None,
                     source=c["source"], reason=c["reason"], valid=ok, history_days=days,
                     input_hash=h, validated_at=now,
+                    weight_pct=Decimal(str(c["weight"])) if c.get("weight") is not None else None,
                 ))
             if not any(c for c in candidates[kind]):
                 errors.append(f"{fund.fund_code}: no {kind} proxy suggested")
@@ -301,11 +304,13 @@ OVERRIDE_STALE_DAYS = 90
 async def set_manual(
     db: AsyncSession, proj_id: str, kind: str, tickers: list[str],
     source_note: str | None = None, source_as_of: date | None = None,
+    weights: dict[str, Decimal] | None = None,
 ) -> list[FundProxy]:
     """
     Admin override for one kind. An empty list removes the override (sync re-suggests).
     source_note / source_as_of record where the tickers came from (e.g. "master fund
     factsheet", 2026-09-30) — overrides older than OVERRIDE_STALE_DAYS are flagged stale.
+    weights: {ticker: % of NAV of the underlying holding} from that same source.
     """
     await db.execute(delete(FundProxy).where(FundProxy.sec_proj_id == proj_id, FundProxy.kind == kind))
     rows = []
@@ -314,7 +319,8 @@ async def set_manual(
         ok, days = await validate(kind, t)
         row = FundProxy(sec_proj_id=proj_id, kind=kind, ticker=t, source="manual",
                         reason="Set manually by admin", valid=ok, history_days=days, validated_at=now,
-                        source_note=(source_note or None) and source_note[:300], source_as_of=source_as_of)
+                        source_note=(source_note or None) and source_note[:300], source_as_of=source_as_of,
+                        weight_pct={k.strip().upper(): v for k, v in (weights or {}).items()}.get(t))
         db.add(row)
         rows.append(row)
     await db.commit()

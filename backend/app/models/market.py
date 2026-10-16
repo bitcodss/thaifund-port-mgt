@@ -37,6 +37,9 @@ class FundProxy(Base):
     input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Manual overrides: where the tickers came from and how current that data is, so a
     # stale override (holdings drift, sync never replaces it) can be flagged.
+    # Weight (% of NAV) of the holding this ticker represents — Phase 3 ranks a fund's
+    # news by holding weight, not by how many headlines a ticker gets.
+    weight_pct: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
     source_note: Mapped[str | None] = mapped_column(String(300), nullable=True)
     source_as_of: Mapped[date | None] = mapped_column(Date, nullable=True)
     validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -89,6 +92,7 @@ class FundFactsheet(Base):
     text_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     holdings: Mapped[list | None] = mapped_column(JSON, nullable=True)   # [{name, pct}]
     holdings_scope: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    holdings_issue: Mapped[str | None] = mapped_column(String(20), nullable=True)  # see factsheet_service
     master_isin: Mapped[str | None] = mapped_column(String(12), nullable=True)
     aimc_category_raw: Mapped[str | None] = mapped_column(String(150), nullable=True)
     aimc_category: Mapped[str | None] = mapped_column(String(150), nullable=True, index=True)  # official name

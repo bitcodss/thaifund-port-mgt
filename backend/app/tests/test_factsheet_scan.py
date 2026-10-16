@@ -151,3 +151,26 @@ async def test_metadata_sync_stores_fx_policy_for_every_fund(db):
         s.factsheet_key = s.SEC_API_KEY = "k"
         await sync_service.sync_fund_metadata(db)
     assert (await db.get(Fund, "ANYFUND")).fx_hedge == "ไม่ป้องกัน (unhedged)"
+
+
+class TestHoldingsIssue:
+    FILL = "x" * 300 + "\n"
+
+    def test_reasons(self):
+        h = fs.holdings_issue
+        assert h("   ", None) == "no_text"
+        assert h(self.FILL + "ทรัพย์สินที่ลงทุน 5 อันดับแรก\n  (chart)\n", None) == "no_rows"
+        assert h(self.FILL + "" * 25, None) == "garbled_thai"
+        assert h(self.FILL + "no holdings section here", None) == "no_heading"
+        assert h(self.FILL, {"rows": [], "master": False, "fund_units_only": True}) == "fund_units"
+        assert h(self.FILL, {"rows": [{"name": "X Inc", "pct": 5}], "master": True}) is None
+
+
+@pytest.mark.asyncio
+async def test_scan_can_be_restricted_to_projects(db):
+    await _seed(db, "P1", "P2", "P3")
+    a, b, c = _patches(latest=("https://pdf", None))
+    with a, b, c:
+        r = await fs.scan_factsheets(db, force=True, proj_ids={"P2"})
+    assert r["scanned"] == 1
+    assert await db.get(FundFactsheet, "P1") is None and await db.get(FundFactsheet, "P2") is not None

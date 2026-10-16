@@ -124,6 +124,7 @@ class FundProxyOut(BaseModel):
     valid: bool
     history_days: int | None
     validated_at: datetime | None
+    weight_pct: Decimal | None = None
     source_note: str | None = None
     source_as_of: date | None = None
     created_at: datetime | None = None
@@ -150,6 +151,7 @@ class FundProxyUpdate(BaseModel):
     tickers: list[str]   # empty → remove the manual override; sync re-suggests
     source_note: str | None = None     # e.g. "Master fund factsheet (Baillie Gifford)"
     source_as_of: date | None = None   # date of that source data
+    weights: dict[str, Decimal] | None = None   # {ticker: holding % of NAV} from that source
 
 
 class NewsDigestOut(BaseModel):

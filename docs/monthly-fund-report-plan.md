@@ -58,6 +58,10 @@ numbers computed by code, poorly performing funds first. Local Ollama only.
 - Many funds share news tickers (TSM, BABA, TCEHY appear in ~6 funds). Mention shared
   drivers ONCE at portfolio level and refer to them from fund cards — never repeat the
   same story on every card.
+- Rank a fund's news by HOLDING WEIGHT (`fund_proxies.weight_pct`), not by headline count:
+  big names (TSM) out-publish smaller holdings (MercadoLibre, First Quantum) many times over,
+  so a count-based pick would make every EM card a TSM story. Proxies without a weight
+  (LLM fallback) rank last.
 - Tax constraints: RMF/SSF/ThaiESG holding rules per lot; cross-AMC moves are transfers
   (allowed, slower), not instant switches.
 - Look-through exposure (top-5 only) and allocation drift vs last month.

@@ -198,7 +198,8 @@ class TestRefreshProxies:
                            holdings=[{"name": "NVIDIA CORP", "pct": 11.3}, {"name": "MICRON TECHNOLOGY INC", "pct": 11}])
         await self._run(db, search=_search, factsheet=fs)
         news = (await db.execute(select(FundProxy).where(FundProxy.kind == "news"))).scalars().all()
-        assert sorted((r.ticker, r.source) for r in news) == [("MU", "factsheet"), ("NVDA", "factsheet")]
+        assert sorted((r.ticker, r.source, r.weight_pct) for r in news) == [
+            ("MU", "factsheet", Decimal("11")), ("NVDA", "factsheet", Decimal("11.3"))]   # holding weight kept
         assert all("master-fund top holding" in r.reason for r in news)
 
     @pytest.mark.asyncio
@@ -268,8 +269,10 @@ class TestRefreshProxies:
     @pytest.mark.asyncio
     async def test_set_manual_and_clear(self, db):
         with patch("app.services.proxy_service.validate", new=AsyncMock(return_value=(True, None))):
-            rows = await proxy_service.set_manual(db, "P1", "news", [" ewj ", "EWJ", "SONY"])
-        assert [(r.ticker, r.source) for r in rows] == [("EWJ", "manual"), ("SONY", "manual")]
+            rows = await proxy_service.set_manual(db, "P1", "news", [" ewj ", "EWJ", "SONY"],
+                                                  weights={"sony": Decimal("4.2")})
+        assert [(r.ticker, r.source, r.weight_pct) for r in rows] == [
+            ("EWJ", "manual", None), ("SONY", "manual", Decimal("4.2"))]
         await proxy_service.set_manual(db, "P1", "news", [])
         assert (await db.execute(select(FundProxy))).scalars().all() == []
 

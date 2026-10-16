@@ -88,6 +88,30 @@ def parse_top_holdings(text: str) -> dict | None:
     return best if score(best)[0] > 0 else {"rows": best["rows"], "master": best["master"], "fund_units_only": True}
 
 
+_PRIVATE_USE = re.compile("[\ue000-\uf8ff]")   # glyphs pdftotext couldn't map (broken Thai fonts)
+GARBLED_PUA_MIN = 20
+
+
+def holdings_issue(text: str, parsed: dict | None) -> str | None:
+    """
+    Why no stock-level holdings came out of a factsheet (None = holdings parsed):
+      no_text       — PDF has no extractable text (scanned image)
+      garbled_thai  — Thai font maps to private-use glyphs, so the "5 อันดับ" heading is unreadable
+      no_heading    — readable text but no top-5 holdings heading
+      no_rows       — heading found but no "name  weight" rows (holdings drawn as a chart, LHCYBER-style)
+      fund_units    — only the feeder's fund/ETF units are listed
+    """
+    if parsed is not None:
+        return "fund_units" if parsed.get("fund_units_only") else None
+    if len(text.strip()) < 200:
+        return "no_text"
+    if any(_ANCHOR.search(line) for line in text.split("\n")):
+        return "no_rows"
+    if len(_PRIVATE_USE.findall(text)) >= GARBLED_PUA_MIN:
+        return "garbled_thai"
+    return "no_heading"
+
+
 def parse_master_isin(text: str) -> str | None:
     m = _ISIN.search(text)
     return m.group(1) if m else None
@@ -131,6 +155,7 @@ def apply_parsed(stored: FundFactsheet, text: str) -> None:
     stored.holdings = parsed["rows"] if parsed else None
     stored.holdings_scope = (None if not parsed else "fund_units" if parsed.get("fund_units_only")
                              else "master" if parsed["master"] else "fund")
+    stored.holdings_issue = holdings_issue(text, parsed)
     stored.master_isin = parse_master_isin(text)
     stored.aimc_category_raw = raw_cat
     stored.aimc_category = canonical_category(raw_cat)
@@ -190,7 +215,7 @@ SCAN_PROGRESS_EVERY = 50
 
 
 async def scan_factsheets(db: AsyncSession, force: bool = False, limit: int | None = None,
-                          delay: float = SCAN_DELAY_SECONDS) -> dict:
+                          delay: float = SCAN_DELAY_SECONDS, proj_ids: set[str] | None = None) -> dict:
     """
     Parse the latest factsheet of every active (RG) fund project — AIMC category,
     holdings (names + weights only; tickers are resolved for held funds elsewhere),
@@ -199,15 +224,17 @@ async def scan_factsheets(db: AsyncSession, force: bool = False, limit: int | No
     Resumable: each project's row is its checkpoint. Projects already scanned
     ("ok" / "no_factsheet") are skipped unless force=True; "error" rows are retried.
     Only one scan runs at a time (a running fund_factsheet_scan job blocks others).
+    proj_ids restricts the scan to those projects (e.g. re-parse only failures).
     """
     running = (await db.execute(select(SyncJob).where(
         SyncJob.type == "factsheet_scan", SyncJob.status == "running"))).scalars().first()
     if running:
         return {"skipped": "another factsheet scan is running", "job_id": str(running.id)}
 
-    proj_ids = sorted({p for (p,) in (await db.execute(
+    universe = sorted({p for (p,) in (await db.execute(
         select(Fund.sec_proj_id).where(Fund.sec_proj_id.isnot(None), Fund.fund_status == "RG")
     )).all()})
+    proj_ids = universe if proj_ids is None else [p for p in universe if p in proj_ids]
     done = set() if force else {p for (p,) in (await db.execute(
         select(FundFactsheet.sec_proj_id).where(FundFactsheet.scan_status.in_(("ok", "no_factsheet")))
     )).all()}
