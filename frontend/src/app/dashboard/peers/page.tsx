@@ -71,6 +71,8 @@ function GroupCard({ g, themes, isAdmin, onChanged }: {
               {g.basis === "category" && ` (theme group has only ${g.theme_masters} — needs 5)`}
               {" "}· one peer per master fund
               {!!g.pending_excluded && ` · ${g.pending_excluded} AI-categorised fund(s) excluded until approved`}
+              {!!g.borderline_excluded && ` · ${g.borderline_excluded} borderline master(s) left out (models disagreed on theme)`}
+              {!!g.theme_unreviewed && ` · theme unreviewed: ${g.theme_unreviewed} master(s)`}
             </p>
             <button className="flex items-center gap-1 text-xs text-primary" onClick={() => setOpen(!open)}>
               {open ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />} Peers

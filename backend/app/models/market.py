@@ -120,7 +120,7 @@ class PeerProfile(Base):
 
     sec_proj_id: Mapped[str] = mapped_column(String(50), primary_key=True)
     aimc_category: Mapped[str | None] = mapped_column(String(150), nullable=True, index=True)
-    aimc_source: Mapped[str | None] = mapped_column(String(10), nullable=True)      # parsed|inferred
+    aimc_source: Mapped[str | None] = mapped_column(String(10), nullable=True)      # parsed|inherited|inferred|manual
     aimc_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     peer_theme: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
     theme_source: Mapped[str | None] = mapped_column(String(10), nullable=True)     # fixed|ai|manual
@@ -137,6 +137,6 @@ class PeerProfile(Base):
     # Theme is classified once per master by two models: agreed → automatic; they differ → "review"
     # (still counted in peer stats, labelled "theme unreviewed"). theme_alt = second model's answer.
     theme_alt: Mapped[str | None] = mapped_column(String(60), nullable=True)
-    theme_status: Mapped[str | None] = mapped_column(String(12), nullable=True)   # agreed|review|manual|fixed
+    theme_status: Mapped[str | None] = mapped_column(String(12), nullable=True)   # agreed|review|manual|rule|fixed
     theme_input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     classifier_input: Mapped[dict | None] = mapped_column(JSON, nullable=True)

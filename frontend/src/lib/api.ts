@@ -359,7 +359,7 @@ export interface PeerGroup {
   sec_proj_id: string;
   held_codes?: string[];
   aimc_category: string | null;
-  aimc_source?: "parsed" | "inferred" | null;
+  aimc_source?: "parsed" | "inherited" | "inferred" | "manual" | null;
   aimc_reason?: string | null;
   peer_theme?: string | null;
   theme_source?: "fixed" | "ai" | "manual" | null;
@@ -367,6 +367,8 @@ export interface PeerGroup {
   basis?: "theme" | "category";
   theme_masters?: number;
   pending_excluded?: number;
+  borderline_excluded?: number;
+  theme_unreviewed?: number;
   masters?: PeerMaster[];
 }
 

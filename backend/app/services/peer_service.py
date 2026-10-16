@@ -28,7 +28,7 @@ from collections import Counter
 
 from app.services.aimc import AIMC_CATEGORIES, AIMC_DEFINITIONS
 from app.services.llm import LlmError, generate_json
-from app.services.peer_taxonomy import MIN_THEME_GROUP, themes_for
+from app.services.peer_taxonomy import broad_index_theme, MIN_THEME_GROUP, themes_for
 from app.services.sec_api import SecApiError
 
 
@@ -174,7 +174,7 @@ async def build_peer_profiles(db: AsyncSession, proj_ids: set[str] | None = None
     db.add(job)
     await db.commit()
 
-    counts = {"built": 0, "unchanged": 0, "inferred": 0, "error": 0}
+    counts = {"built": 0, "unchanged": 0, "inherited": 0, "inferred": 0, "error": 0}
     errors: list[str] = []
     for n, proj_id in enumerate(todo, 1):
         fs_row = factsheets[proj_id]
@@ -229,11 +229,14 @@ async def build_peer_profiles(db: AsyncSession, proj_ids: set[str] | None = None
             elif fs_row.aimc_category:
                 prof.aimc_category, prof.aimc_source, prof.aimc_reason = fs_row.aimc_category, "parsed", None
             elif siblings:
-                # other Thai feeders of the same master print a category — inherit the majority
+                # other Thai feeders of the same master print a category: all agree → rule, approved
+                # ("inherited"); they disagree → majority, pending approval ("inferred")
                 cat, c = siblings.most_common(1)[0]
-                prof.aimc_category, prof.aimc_source = cat, "inferred"
-                prof.aimc_reason = f"Same master fund as {c} fund(s) whose factsheets say {cat}"
-                counts["inferred"] += 1
+                prof.aimc_category = cat
+                prof.aimc_source = "inherited" if len(siblings) == 1 else "inferred"
+                prof.aimc_reason = f"Same master fund as {c} fund(s) whose factsheets say {cat}" + (
+                    "" if len(siblings) == 1 else f" (others say {', '.join(k for k in siblings if k != cat)})")
+                counts["inherited" if len(siblings) == 1 else "inferred"] += 1
             elif base.get("policy_desc") == "ตราสารทุน" and base.get("invest_country_flag") in ("1", "4"):
                 out = await infer_aimc_category(data)
                 prof.aimc_category, prof.aimc_source, prof.aimc_reason = out["category"], "inferred", out["reason"]
@@ -255,7 +258,7 @@ async def build_peer_profiles(db: AsyncSession, proj_ids: set[str] | None = None
                 " ".join(f"{k}:{v}" for k, v in counts.items())
         await db.commit()
 
-    theme_counts = await assign_themes(db, force=force)
+    theme_counts = await assign_themes(db, force=force, only=proj_ids)
     job = await db.get(SyncJob, job.id)
     job.completed_at = datetime.now(timezone.utc)
     job.status = "error" if errors or theme_counts["errors"] else "success"
@@ -267,11 +270,13 @@ async def build_peer_profiles(db: AsyncSession, proj_ids: set[str] | None = None
             "errors": errors + theme_counts["errors"]}
 
 
-async def assign_themes(db: AsyncSession, force: bool = False) -> dict:
+async def assign_themes(db: AsyncSession, force: bool = False, only: set[str] | None = None) -> dict:
     """
     One theme per master fund (all its Thai feeders share it), classified by two models.
     Both agree → status "agreed" (automatic); they differ → "review" (still counted, labelled
-    "theme unreviewed"). A manual theme on any feeder applies to every feeder of that master.
+    "theme unreviewed"; counted at category level only). A manual theme on any feeder applies to
+    every feeder of that master; a passive broad-index master gets its broad theme by rule.
+    `force` re-classifies every master, or only masters containing a project in `only`.
     Models run one after the other (all primary calls, then all review calls) so two ~20 GB
     models aren't swapped in and out of memory per fund.
     """
@@ -281,7 +286,7 @@ async def assign_themes(db: AsyncSession, force: bool = False) -> dict:
         if themes_for(p.aimc_category) is not None:
             groups.setdefault((p.aimc_category, _member_key(p)), []).append(p)
 
-    counts = {"masters": len(groups), "manual": 0, "unchanged": 0, "agreed": 0, "review": 0}
+    counts = {"masters": len(groups), "manual": 0, "rule": 0, "unchanged": 0, "agreed": 0, "review": 0}
     errors: list[str] = []
     todo: list[tuple[tuple[str, str], list[PeerProfile], dict, str]] = []
     for gkey, members in groups.items():
@@ -293,8 +298,16 @@ async def assign_themes(db: AsyncSession, force: bool = False) -> dict:
             continue
         rep = max(members, key=lambda m: (bool((m.classifier_input or {}).get("top_holdings")), m.sec_proj_id))
         data = rep.classifier_input or {}
+        broad = broad_index_theme(gkey[0], any(m.is_passive for m in members), data)
+        if broad:
+            for m in members:
+                m.peer_theme, m.theme_source, m.theme_status, m.theme_alt = broad, "rule", "rule", None
+                m.theme_reason = "Rule: passive fund tracking a broad market index"
+            counts["rule"] += 1
+            continue
         h = hashlib.sha256(json.dumps([gkey[0], data], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-        if not force and all(m.theme_input_hash == h and m.theme_status in ("agreed", "review") for m in members):
+        forced = force and (only is None or any(m.sec_proj_id in only for m in members))
+        if not forced and all(m.theme_input_hash == h and m.theme_status in ("agreed", "review") for m in members):
             counts["unchanged"] += 1
             continue
         todo.append((gkey, members, data, h))
@@ -333,7 +346,7 @@ async def assign_themes(db: AsyncSession, force: bool = False) -> dict:
 
 def is_approved(p: PeerProfile) -> bool:
     """Inferred (LLM) categories don't count as peers until an admin approves them (→ manual)."""
-    return p.aimc_source in ("parsed", "manual")
+    return p.aimc_source in ("parsed", "manual", "inherited")
 
 
 def _member_key(p: PeerProfile) -> str:
@@ -345,6 +358,8 @@ async def peer_group(db: AsyncSession, proj_id: str) -> dict | None:
     """
     Peers of one project: its theme group when that has >= MIN_THEME_GROUP distinct
     masters, otherwise its whole AIMC category. Members are grouped per master.
+    Masters whose theme the two models disagreed on ("review") are left out of theme groups
+    (they're genuinely borderline) but counted at category level.
     """
     me = await db.get(PeerProfile, proj_id)
     if me is None or not me.aimc_category:
@@ -352,7 +367,10 @@ async def peer_group(db: AsyncSession, proj_id: str) -> dict | None:
     all_in_cat = (await db.execute(select(PeerProfile).where(PeerProfile.aimc_category == me.aimc_category))).scalars().all()
     pending = [p for p in all_in_cat if not is_approved(p) and p.sec_proj_id != proj_id]
     in_cat = [p for p in all_in_cat if is_approved(p) or p.sec_proj_id == proj_id]
-    in_theme = [p for p in in_cat if p.peer_theme == me.peer_theme]
+    in_theme = [p for p in in_cat if p.peer_theme == me.peer_theme
+                and (p.theme_status != "review" or p.sec_proj_id == proj_id)]
+    borderline = {_member_key(p) for p in in_cat if p.theme_status == "review" and p.sec_proj_id != proj_id
+                  and me.peer_theme in (p.peer_theme, p.theme_alt)}
     theme_masters = {_member_key(p) for p in in_theme}
     basis, members = ("theme", in_theme) if len(theme_masters) >= MIN_THEME_GROUP else ("category", in_cat)
 
@@ -373,8 +391,10 @@ async def peer_group(db: AsyncSession, proj_id: str) -> dict | None:
         "aimc_reason": me.aimc_reason, "peer_theme": me.peer_theme, "theme_source": me.theme_source,
         "theme_reason": me.theme_reason, "theme_status": me.theme_status, "theme_alt": me.theme_alt, "basis": basis, "theme_masters": len(theme_masters),
         "pending_excluded": len([p for p in pending if basis == "category" or p.peer_theme == me.peer_theme]),
-        # "theme unreviewed": peers (or this fund) whose theme the two models disagreed on
-        "theme_unreviewed": len([p for p in members if p.theme_status == "review"]),
+        # borderline masters (models disagreed, one answer = this theme) left out of the theme group
+        "borderline_excluded": len(borderline) if basis == "theme" else 0,
+        # category basis keeps borderline members → label "theme unreviewed"
+        "theme_unreviewed": len({_member_key(p) for p in members if p.theme_status == "review"}),
         "masters": sorted(grouped.values(), key=lambda g: (not any(f["is_self"] for f in g["funds"]),
                                                              -len(g["funds"]), g["master_key"] or "")),
     }

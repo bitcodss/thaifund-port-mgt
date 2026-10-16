@@ -278,7 +278,7 @@ class TestInferenceImprovements:
         await _seed(db, "NEW", None, isin="IE00SAME")
         r, theme, infer = await _run(db, {"NEW": _profile("NEW", "ONE-DISC")}, theme=AsyncMock(return_value="Growth"))
         p = await db.get(PeerProfile, "NEW")
-        assert (p.aimc_category, p.aimc_source) == ("Global Equity", "inferred")
+        assert (p.aimc_category, p.aimc_source) == ("Global Equity", "inherited")
         assert "Same master fund as 2" in p.aimc_reason
         infer.assert_not_awaited()                                    # no LLM guess needed
 
@@ -387,3 +387,49 @@ class TestThemesPerMasterTwoModels:
             prof = await db.get(PeerProfile, p)
             await db.refresh(prof)
             assert (prof.peer_theme, prof.theme_status) == ("Quality / Dividend", "manual")
+
+
+class TestBorderlineAndRules:
+
+    def test_broad_index_rule(self):
+        from app.services.peer_taxonomy import broad_index_theme as b
+        assert b("Global Equity", True, {"master_fund": "iShares MSCI ACWI ETF"}) == "General"
+        assert b("US Equity", True, {"master_fund": "SPDR S&P 500 ETF Trust"}) == "Broad / S&P 500"
+        assert b("Japan Equity", True, {"master_fund": "NEXT FUNDS Nikkei 225 Exchange Traded Fund"}) == "Broad / Index"
+        assert b("Asia Pacific Ex Japan", True, {"benchmark": "ดัชนี MSCI AC Asia (ex Japan) net TR USD"}) == "Broad"
+        assert b("Global Equity", True, {"master_fund": "iShares Edge MSCI World Quality Factor UCITS ETF"}) is None
+        assert b("Global Equity", True, {"master_fund": "Vanguard FTSE All-World High Dividend Yield UCITS ETF"}) is None
+        assert b("Emerging Market", True, {"master_fund": "iShares MSCI Emerging Markets ex China ETF"}) is None
+        assert b("Japan Equity", True, {"master_fund": "NEXT FUNDS Nikkei Semiconductor Stock Index ETF"}) is None
+        assert b("Global Equity", False, {"benchmark": "MSCI ACWI Net Total Return USD"}) is None   # active fund
+
+    @pytest.mark.asyncio
+    async def test_borderline_masters_out_of_theme_group_but_in_category(self, db):
+        for i in range(5):
+            await _prof(db, f"A{i}", "Global Equity", "General", master=f"M{i}")
+        for i in range(2):
+            await _prof(db, f"R{i}", "Global Equity", "General", master=f"R{i}")
+            p = await db.get(PeerProfile, f"R{i}")
+            p.theme_status, p.theme_alt = "review", "Growth"
+        await db.commit()
+        g = await ps.peer_group(db, "A0")
+        assert g["basis"] == "theme" and g["theme_masters"] == 5 and g["borderline_excluded"] == 2
+        ids = {f["sec_proj_id"] for m in g["masters"] for f in m["funds"]}
+        assert not ids & {"R0", "R1"}
+        p = await db.get(PeerProfile, "A4")
+        p.peer_theme = "Value"                                     # theme group drops to 4 → category
+        await db.commit()
+        g = await ps.peer_group(db, "A0")
+        assert g["basis"] == "category" and {"R0", "R1"} <= {f["sec_proj_id"] for m in g["masters"] for f in m["funds"]}
+        assert g["theme_unreviewed"] == 2
+
+    @pytest.mark.asyncio
+    async def test_unanimous_same_master_category_is_approved_by_rule(self, db):
+        for p, cat in (("S1", "Commodities Precious Metals"), ("S2", "Commodities Precious Metals")):
+            db.add(PeerProfile(sec_proj_id=p, aimc_category=cat, aimc_source="parsed",
+                               master_key="IE00GOLD", master_key_kind="isin"))
+        await _seed(db, "NEW", None, isin="IE00GOLD")
+        r, _, infer = await _run(db, {"NEW": _profile("NEW", "GOLD-RMF")})
+        p = await db.get(PeerProfile, "NEW")
+        assert (p.aimc_category, p.aimc_source) == ("Commodities Precious Metals", "inherited") and ps.is_approved(p)
+        infer.assert_not_awaited()
