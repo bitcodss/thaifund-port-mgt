@@ -129,8 +129,9 @@ async def pdf_to_text(pdf: bytes) -> str:
     return unicodedata.normalize("NFKC", out.decode("utf-8", errors="replace"))
 
 
-# "กลุ่ม Technology Equity" / "• กลุม US Equity" / "กลุ่มกองทุนรวม: Health Care" (vowels often dropped)
-_AIMC = re.compile(r"กล\S{0,2}ม(?:\S{0,2}กอง\S{0,2}ท\S{0,2}น\S{0,2}รวม\S{0,2}\s*:)?\s+"
+# "กลุ่ม Technology Equity" / "• กลุม US Equity" / "กลุ่มกองทุนรวม: Health Care" /
+# "• กลุมกองทุน : Technology Equity" (vowels often dropped)
+_AIMC = re.compile(r"กล\S{0,2}ม(?:\S{0,2}กอง\S{0,2}ท\S{0,2}น(?:\S{0,2}รวม)?\S{0,2}\s*:)?\s+"
                    r"([A-Z][A-Za-z0-9 &/\-\.]+?)(?=\s{2,}|$)", re.M)
 _FX_HEDGE_PCT = re.compile(r"FX\s*Hedging\s*:?\s*(-?\d{1,3}(?:\.\d+)?)\s*%", re.I)
 

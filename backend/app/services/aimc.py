@@ -1,7 +1,8 @@
 """
 Official AIMC fund categories (mutual funds), from the AIMC Category Performance
-Report (as of 30/09/2026). Factsheets print the category with layout noise and
-small spelling differences, so matching is done on a normalised key.
+Report (as of 30/09/2026) plus "Miscellaneous" (an official category the report
+omits). Factsheets print the category with layout noise and small spelling
+differences, so matching is done on a normalised key plus a few seen misspellings.
 """
 from __future__ import annotations
 
@@ -14,11 +15,11 @@ AIMC_CATEGORIES = [
     "Emerging Market Bond Discretionary F/X Hedge or Unhedge", "Energy", "Equity General",
     "Equity Large Cap", "Equity Small - Mid Cap", "European Equity", "Foreign Investment Allocation",
     "Fund of Property Fund - Foreign", "Fund of Property Fund - Thai",
-    "Fund of Property fund -Thai and Foreign", "Global Bond Discretionary F/X Hedge",
+    "Fund of Property fund -Thai and Foreign", "Global Bond Discretionary F/X Hedge or Unhedge",
     "Global Bond Fully F/X Hedge", "Global Equity", "Global Equity - Alternative Energy",
     "Global Equity - Consumer Goods and Services", "Global Equity - Infrastructure",
     "Global Equity Fully FX Risk Hedge", "Greater China Equity", "Health Care", "High Yield Bond",
-    "India Equity", "Japan Equity", "Long Term General Bond", "Mid Term General Bond",
+    "India Equity", "Japan Equity", "Long Term General Bond", "Mid Term General Bond", "Miscellaneous",
     "Mid Term Government Bond", "Moderate Allocation", "Money Market General",
     "Money Market Government", "Other Global Sector Equity", "SET 50 Index Fund",
     "Short Term General Bond", "Short Term Government Bond", "Technology Equity", "Thai Free Hold",
@@ -31,7 +32,15 @@ def category_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKC", name).lower())
 
 
+# Misspellings found in AMC factsheets
+_ALIASES = {
+    "Miscelleneous": "Miscellaneous",
+    "Emerging Market Bond Discretionary F/X Hedge or Unhedged":
+        "Emerging Market Bond Discretionary F/X Hedge or Unhedge",
+}
+
 _BY_KEY = {category_key(c): c for c in AIMC_CATEGORIES}
+_BY_KEY.update({category_key(a): c for a, c in _ALIASES.items()})
 
 
 def canonical_category(raw: str | None) -> str | None:

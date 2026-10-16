@@ -29,8 +29,16 @@ async def db():
 
 
 class TestAimcCategories:
-    def test_official_list_has_44(self):
-        assert len(AIMC_CATEGORIES) == 44 == len(set(AIMC_CATEGORIES))
+    def test_official_list_has_45(self):
+        # 44 from the AIMC Category Performance Report + Miscellaneous (official, omitted there)
+        assert len(AIMC_CATEGORIES) == 45 == len(set(AIMC_CATEGORIES))
+
+    def test_aliases_for_seen_misspellings(self):
+        assert canonical_category("Miscelleneous") == "Miscellaneous"
+        assert canonical_category("Global Bond Discretionary F/X Hedge or Unhedge") == \
+            "Global Bond Discretionary F/X Hedge or Unhedge"
+        assert canonical_category("Emerging Market Bond Discretionary F/X Hedge or Unhedged") == \
+            "Emerging Market Bond Discretionary F/X Hedge or Unhedge"
 
     def test_canonical_tolerates_spacing_case_and_ligatures(self):
         assert canonical_category("Asia Paciﬁc Ex Japan") == "Asia Pacific Ex Japan"
@@ -49,6 +57,7 @@ class TestParsing:
         ("  กลุ่ม Greater China Equity          ของ NAV", "Greater China Equity"),
         ("• กลุ่มกองทนรวม: Health Care                    7 : เสยงสง", "Health Care"),
         ("        กลุม Asia Pacific Ex Japan                      *ความเสี่ยง", "Asia Pacific Ex Japan"),
+        ("• กลุมกองทุน : Technology Equity", "Technology Equity"),
     ])
     def test_aimc_category_layouts(self, line, expected):
         assert fs.parse_aimc_category("ประเภทกองทุนรวม / กลุ่มกองทุนรวม\n" + line + "\n") == expected
