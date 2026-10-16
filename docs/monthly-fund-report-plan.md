@@ -73,6 +73,15 @@ numbers computed by code, poorly performing funds first. Local Ollama only.
   fee / tracking comparison, and the basis for switching to a cheaper fund holding the same thing.
 - Flags: 1M return < −2σ (own history), 3M < −2σ of 3M, peer percentile < 25 two months
   running, P&L since entry ≤ −10%.
+- The bottom-quartile rule fires ONLY on a theme-basis comparison. A fund compared with its
+  whole category (its theme group has < 5 masters — e.g. KKP GVALUE, a value fund among 133
+  mostly growth / broad Global Equity masters) would sit in the bottom quartile every month a
+  style is out of favour. For these, rank is shown as context only, the report states plainly
+  that the comparison is the whole category because the style group is too small, and only
+  the two own-history rules and the −10% rule can flag. Monthly snapshots record the basis.
+- Theme groups: masters the two models disagree on are left out (counted at category level);
+  passive plain broad-index funds get the broad theme by rule — never an index that carves
+  out a country (ex-US, ex-China…), except "ex Japan" in Asia Pacific Ex Japan.
 
 ## Phase 3 — report builder (not built)
 - Many funds share news tickers (TSM, BABA, TCEHY appear in ~6 funds). Mention shared

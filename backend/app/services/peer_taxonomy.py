@@ -32,7 +32,7 @@ MIN_THEME_GROUP = 5
 # Matched on master fund name + benchmark; factor / sector / screened variants are excluded.
 BROAD_INDEX_RULES: dict[str, tuple[str, list[str]]] = {
     "Global Equity": ("General", [r"\bACWI\b", r"\bAC World\b", r"\bMSCI World\b", r"\bAll[- ]World\b",
-                                  r"\bTotal World\b", r"\bGlobal Stock Market\b", r"\bTotal International\b"]),
+                                  r"\bTotal World\b", r"\bGlobal Stock Market\b"]),
     "US Equity": ("Broad / S&P 500", [r"\bS&P 500\b", r"\bTotal (US )?Stock Market\b"]),
     "Japan Equity": ("Broad / Index", [r"\bNikkei 225\b", r"\bTOPIX\b", r"\bMSCI Japan\b"]),
     "Asia Pacific Ex Japan": ("Broad", [r"\bAsia (Pacific )?\(?ex[- ]Japan\b"]),
@@ -41,7 +41,10 @@ BROAD_INDEX_RULES: dict[str, tuple[str, list[str]]] = {
 }
 BROAD_INDEX_EXCLUDE = (r"quality|dividend|yield|value|momentum|growth|small|mid[- ]cap|islamic|factor|"
                        r"volatility|equal weight|esg|sri|sustainable|semiconductor|tech|ex[- ]china|"
-                       r"miners|buyback|sector|leveraged|inverse")
+                       r"miners|buyback|sector|leveraged|inverse|international")
+# An index that carves out a country (ex-US, ex China…) isn't the broad market — left to the models.
+# "ex Japan" is the definition of the Asia Pacific Ex Japan category, so it's allowed there only.
+_CARVE_OUT = r"\bex[- ]\w"
 
 
 def broad_index_theme(category: str | None, is_passive: bool, data: dict) -> str | None:
@@ -52,6 +55,9 @@ def broad_index_theme(category: str | None, is_passive: bool, data: dict) -> str
         return None
     text = " / ".join(filter(None, [data.get("master_fund"), data.get("benchmark")]))
     if re.search(BROAD_INDEX_EXCLUDE, text, re.I):
+        return None
+    carve_text = re.sub(r"\(?\bex[- ]Japan\b", "", text, flags=re.I) if category == "Asia Pacific Ex Japan" else text
+    if re.search(_CARVE_OUT, carve_text, re.I):
         return None
     return rule[0] if any(re.search(p, text, re.I) for p in rule[1]) else None
 

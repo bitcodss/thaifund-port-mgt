@@ -402,6 +402,11 @@ class TestBorderlineAndRules:
         assert b("Emerging Market", True, {"master_fund": "iShares MSCI Emerging Markets ex China ETF"}) is None
         assert b("Japan Equity", True, {"master_fund": "NEXT FUNDS Nikkei Semiconductor Stock Index ETF"}) is None
         assert b("Global Equity", False, {"benchmark": "MSCI ACWI Net Total Return USD"}) is None   # active fund
+        assert b("Global Equity", True, {"master_fund": "Vanguard Total International Stock ETF"}) is None  # ex-US
+        assert b("Global Equity", True, {"benchmark": "MSCI ACWI ex-US Index"}) is None
+        assert b("Global Equity", True, {"master_fund": "iShares MSCI World ex USA ETF"}) is None
+        assert b("Asia Pacific Ex Japan", True, {"master_fund": "iShares Core MSCI Asia ex Japan ETF"}) == "Broad"
+        assert b("Japan Equity", True, {"master_fund": "NEXT FUNDS Nikkei 225 Exchange Traded Fund"}) == "Broad / Index"
 
     @pytest.mark.asyncio
     async def test_borderline_masters_out_of_theme_group_but_in_category(self, db):
