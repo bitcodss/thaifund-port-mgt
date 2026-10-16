@@ -116,6 +116,12 @@ export const api = {
   getCategoryOptions: () => request<CategoryOptions>("GET", "/funds/category-options"),
   getHeldPeerGroups: () => request<PeerGroup[]>("GET", "/peers/held"),
   getPeerThemes: () => request<Record<string, string[]>>("GET", "/peers/themes"),
+  getPeerCategories: () => request<string[]>("GET", "/peers/categories"),
+  getPendingCategories: () => request<PendingCategory[]>("GET", "/peers/pending"),
+  approveCategories: (projIds: string[]) =>
+    request<{ approved: string[] }>("POST", "/peers/approve", { proj_ids: projIds }),
+  setPeerCategory: (projId: string, category: string | null) =>
+    request<PeerGroup>("PUT", `/peers/${encodeURIComponent(projId)}/category`, { category }),
   setPeerTheme: (projId: string, theme: string | null) =>
     request<PeerGroup>("PUT", `/peers/${encodeURIComponent(projId)}/theme`, { theme }),
   getFundProxies: (fundCode: string) =>
@@ -339,6 +345,16 @@ export interface PeerMaster {
   funds: PeerFund[];
 }
 
+export interface PendingCategory {
+  sec_proj_id: string;
+  fund_code: string | null;
+  name_en: string | null;
+  master_fund: string | null;
+  aimc_category: string | null;
+  peer_theme: string | null;
+  aimc_reason: string | null;
+}
+
 export interface PeerGroup {
   sec_proj_id: string;
   held_codes?: string[];
@@ -350,6 +366,7 @@ export interface PeerGroup {
   theme_reason?: string | null;
   basis?: "theme" | "category";
   theme_masters?: number;
+  pending_excluded?: number;
   masters?: PeerMaster[];
 }
 

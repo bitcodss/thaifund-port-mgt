@@ -308,3 +308,35 @@ async def test_category_override_api(db, admin_client):
     p = await db.get(PeerProfile, "G1")
     await db.refresh(p)
     assert p.theme_source is None                                       # re-themed within Health Care next build
+
+
+class TestPendingInferred:
+
+    @pytest.mark.asyncio
+    async def test_inferred_members_excluded_until_approved(self, db, admin_client):
+        client, _ = admin_client
+        for i in range(4):
+            await _prof(db, f"A{i}", "Technology Equity", "AI", master=f"M{i}")
+        db.add(Fund(fund_code="C-I1", sec_proj_id="I1", fund_status="RG", name_en="Inferred AI fund",
+                    master_fund="Some AI ETF"))
+        db.add(PeerProfile(sec_proj_id="I1", aimc_category="Technology Equity", aimc_source="inferred",
+                           aimc_reason="AI ETF", peer_theme="AI", theme_source="ai", master_key="M9",
+                           master_key_kind="isin"))
+        await db.commit()
+        g = await ps.peer_group(db, "A0")
+        assert g["basis"] == "category" and g["theme_masters"] == 4    # pending fund not counted
+        assert g["pending_excluded"] == 1
+        assert all(f["sec_proj_id"] != "I1" for m in g["masters"] for f in m["funds"])
+
+        pending = client.get("/api/v1/peers/pending").json()
+        assert [(p["fund_code"], p["master_fund"], p["aimc_category"]) for p in pending] == \
+            [("C-I1", "Some AI ETF", "Technology Equity")]
+        assert client.post("/api/v1/peers/approve", json={"proj_ids": ["I1", "A0"]}).json() == {"approved": ["I1"]}
+        g = await ps.peer_group(db, "A0")
+        assert g["basis"] == "theme" and g["theme_masters"] == 5 and g["pending_excluded"] == 0
+
+    @pytest.mark.asyncio
+    async def test_categories_endpoint_excludes_miscellaneous(self, admin_client):
+        client, _ = admin_client
+        cats = client.get("/api/v1/peers/categories").json()
+        assert len(cats) == 44 and "Miscellaneous" not in cats

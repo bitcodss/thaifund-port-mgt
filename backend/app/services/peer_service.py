@@ -283,6 +283,11 @@ async def build_peer_profiles(db: AsyncSession, proj_ids: set[str] | None = None
 
 # ── peer groups ───────────────────────────────────────────────────────────────
 
+def is_approved(p: PeerProfile) -> bool:
+    """Inferred (LLM) categories don't count as peers until an admin approves them (→ manual)."""
+    return p.aimc_source in ("parsed", "manual")
+
+
 def _member_key(p: PeerProfile) -> str:
     """One peer per master fund; direct-stock / no-master funds are their own peer."""
     return f"{p.master_key_kind}:{p.master_key}" if p.master_key else f"proj:{p.sec_proj_id}"
@@ -296,7 +301,9 @@ async def peer_group(db: AsyncSession, proj_id: str) -> dict | None:
     me = await db.get(PeerProfile, proj_id)
     if me is None or not me.aimc_category:
         return None
-    in_cat = (await db.execute(select(PeerProfile).where(PeerProfile.aimc_category == me.aimc_category))).scalars().all()
+    all_in_cat = (await db.execute(select(PeerProfile).where(PeerProfile.aimc_category == me.aimc_category))).scalars().all()
+    pending = [p for p in all_in_cat if not is_approved(p) and p.sec_proj_id != proj_id]
+    in_cat = [p for p in all_in_cat if is_approved(p) or p.sec_proj_id == proj_id]
     in_theme = [p for p in in_cat if p.peer_theme == me.peer_theme]
     theme_masters = {_member_key(p) for p in in_theme}
     basis, members = ("theme", in_theme) if len(theme_masters) >= MIN_THEME_GROUP else ("category", in_cat)
@@ -316,6 +323,7 @@ async def peer_group(db: AsyncSession, proj_id: str) -> dict | None:
         "sec_proj_id": proj_id, "aimc_category": me.aimc_category, "aimc_source": me.aimc_source,
         "aimc_reason": me.aimc_reason, "peer_theme": me.peer_theme, "theme_source": me.theme_source,
         "theme_reason": me.theme_reason, "basis": basis, "theme_masters": len(theme_masters),
+        "pending_excluded": len([p for p in pending if basis == "category" or p.peer_theme == me.peer_theme]),
         "masters": sorted(grouped.values(), key=lambda g: (not any(f["is_self"] for f in g["funds"]),
                                                              -len(g["funds"]), g["master_key"] or "")),
     }
