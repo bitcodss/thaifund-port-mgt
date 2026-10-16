@@ -15,7 +15,8 @@ from app.api import analytics as analytics_router_module
 from app.api import peers as peers_router_module
 from app.database import AsyncSessionLocal
 from app.models.fund import Fund, NavHistory
-from app.services import factsheet_service, fund_category_service, news_service, peer_service, proxy_service, sync_service
+from app.services import (factsheet_service, fund_category_service, news_service, peer_metrics, peer_service,
+                          proxy_service, sync_service)
 from app.services.clock import today_ict
 from app.services.portfolio_service import clear_all_cache
 
@@ -132,6 +133,16 @@ async def _weekly_peer_profiles():
             logger.exception("Scheduled peer profiles failed")
 
 
+async def _monthly_peer_snapshot():
+    """Days 1–7 of each month, 03:30 ICT: live peer snapshot of last month (re-run picks up late NAVs)."""
+    async with AsyncSessionLocal() as db:
+        try:
+            result = await peer_metrics.run_monthly_snapshot(db, today_ict())
+            logger.info("Scheduled peer snapshot: %s", result)
+        except Exception:
+            logger.exception("Scheduled peer snapshot failed")
+
+
 async def _daily_dividend_sync():
     """Runs daily at 13:30 UTC (20:30 ICT)."""
     async with AsyncSessionLocal() as db:
@@ -167,6 +178,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_daily_dividend_sync, CronTrigger(hour=13, minute=30))
     scheduler.add_job(_collect_news, CronTrigger(hour="*/2", minute=10, timezone="Asia/Bangkok"))
     scheduler.add_job(_weekly_peer_profiles, CronTrigger(day_of_week="sun", hour=3, minute=0, timezone="Asia/Bangkok"))
+    scheduler.add_job(_monthly_peer_snapshot, CronTrigger(day="1-7", hour=3, minute=30, timezone="Asia/Bangkok"))
     scheduler.add_job(_weekly_news_digests, CronTrigger(day_of_week="mon", hour=6, minute=0, timezone="Asia/Bangkok"))
     scheduler.start()
     yield

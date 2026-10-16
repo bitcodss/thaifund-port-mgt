@@ -208,6 +208,10 @@ async def build_peer_profiles(db: AsyncSession, proj_ids: set[str] | None = None
         rep_row = next((p for p in profiles if _class_code(p) == rep), base)
         prof.representative_code = rep
         prof.hedge_group = hedge_group(rep_row.get("exchange_rate_protection_policy"), base.get("invest_country_flag"))
+        prof.hedge_source = "sec"
+        if prof.hedge_group == "unknown" and fs_row.fx_hedge_policy:
+            # SEC profile leaves the policy empty; the factsheet prints it ("ไม่ป้องกัน (unhedged)")
+            prof.hedge_group, prof.hedge_source = fs_row.fx_hedge_policy, "factsheet"
         prof.is_passive = base.get("management_style") in _PASSIVE_STYLES
         prof.is_esg = "SRI" in specs              # SEC's official sustainable-fund designation only
         mk = master_key(fs_row.master_isin, base.get("feederfund_master_fund"))
@@ -354,6 +358,24 @@ def _member_key(p: PeerProfile) -> str:
     return f"{p.master_key_kind}:{p.master_key}" if p.master_key else f"proj:{p.sec_proj_id}"
 
 
+def select_members(me: PeerProfile, all_in_cat: list[PeerProfile]) -> dict:
+    """
+    Peer membership rules (pure; shared by peer_group and the monthly snapshots):
+    approved categories only; theme group without borderline (models-disagree) masters when it
+    has >= MIN_THEME_GROUP distinct masters, else the whole category.
+    """
+    pending = [p for p in all_in_cat if not is_approved(p) and p.sec_proj_id != me.sec_proj_id]
+    in_cat = [p for p in all_in_cat if is_approved(p) or p.sec_proj_id == me.sec_proj_id]
+    in_theme = [p for p in in_cat if p.peer_theme == me.peer_theme
+                and (p.theme_status != "review" or p.sec_proj_id == me.sec_proj_id)]
+    borderline = {_member_key(p) for p in in_cat if p.theme_status == "review" and p.sec_proj_id != me.sec_proj_id
+                  and me.peer_theme in (p.peer_theme, p.theme_alt)}
+    theme_masters = {_member_key(p) for p in in_theme}
+    basis, members = ("theme", in_theme) if len(theme_masters) >= MIN_THEME_GROUP else ("category", in_cat)
+    return {"basis": basis, "members": members, "theme_masters": theme_masters,
+            "pending": pending, "borderline": borderline}
+
+
 async def peer_group(db: AsyncSession, proj_id: str) -> dict | None:
     """
     Peers of one project: its theme group when that has >= MIN_THEME_GROUP distinct
@@ -365,14 +387,9 @@ async def peer_group(db: AsyncSession, proj_id: str) -> dict | None:
     if me is None or not me.aimc_category:
         return None
     all_in_cat = (await db.execute(select(PeerProfile).where(PeerProfile.aimc_category == me.aimc_category))).scalars().all()
-    pending = [p for p in all_in_cat if not is_approved(p) and p.sec_proj_id != proj_id]
-    in_cat = [p for p in all_in_cat if is_approved(p) or p.sec_proj_id == proj_id]
-    in_theme = [p for p in in_cat if p.peer_theme == me.peer_theme
-                and (p.theme_status != "review" or p.sec_proj_id == proj_id)]
-    borderline = {_member_key(p) for p in in_cat if p.theme_status == "review" and p.sec_proj_id != proj_id
-                  and me.peer_theme in (p.peer_theme, p.theme_alt)}
-    theme_masters = {_member_key(p) for p in in_theme}
-    basis, members = ("theme", in_theme) if len(theme_masters) >= MIN_THEME_GROUP else ("category", in_cat)
+    sel = select_members(me, all_in_cat)
+    basis, members, theme_masters, pending, borderline = (
+        sel["basis"], sel["members"], sel["theme_masters"], sel["pending"], sel["borderline"])
 
     names = {pid: code for pid, code in (await db.execute(
         select(Fund.sec_proj_id, Fund.fund_code).where(Fund.sec_proj_id.in_({p.sec_proj_id for p in members}))

@@ -10,10 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, require_admin
 from app.database import get_db
 from app.models.fund import Fund
-from app.models.market import PeerProfile
+from app.models.market import PeerProfile, PeerSnapshot
 from app.models.portfolio import Portfolio
 from app.models.tax_lot import TaxLot
 from app.models.user import User, UserRole
+from app.services import peer_metrics as pm
 from app.services import peer_service
 from app.services.peer_service import INFERABLE_CATEGORIES
 from app.services.peer_taxonomy import THEMES_BY_CATEGORY, themes_for
@@ -50,8 +51,27 @@ async def held_peer_groups(db: AsyncSession = Depends(get_db), user: User = Depe
     out = []
     for proj_id in sorted(held):
         group = await peer_service.peer_group(db, proj_id)
-        out.append({"held_codes": sorted(held[proj_id]), **(group or {"sec_proj_id": proj_id, "aimc_category": None})})
+        latest = (await db.execute(select(PeerSnapshot).where(PeerSnapshot.sec_proj_id == proj_id)
+                                   .order_by(PeerSnapshot.month.desc()).limit(1))).scalar()
+        out.append({"held_codes": sorted(held[proj_id]), **(group or {"sec_proj_id": proj_id, "aimc_category": None}),
+                    "latest_snapshot": _snapshot_dict(latest) if latest else None})
     return out
+
+
+def _snapshot_dict(s: PeerSnapshot) -> dict:
+    cols = [c.name for c in PeerSnapshot.__table__.columns if c.name not in ("id", "computed_at")]
+    return {c: (float(v) if hasattr(v, "is_finite") else v) for c in cols for v in [getattr(s, c)]}
+
+
+@router.get("/{proj_id}/metrics")
+async def peer_metrics(proj_id: str, db: AsyncSession = Depends(get_db), _=Depends(get_current_user)):
+    """Monthly peer snapshots (newest first) plus 1Y drawdown / volatility of the NAV class used."""
+    rows = (await db.execute(select(PeerSnapshot).where(PeerSnapshot.sec_proj_id == proj_id)
+                             .order_by(PeerSnapshot.month.desc()))).scalars().all()
+    if not rows:
+        raise HTTPException(status_code=404, detail="No peer snapshots for this project")
+    risk = await pm.own_risk(db, rows[0].nav_code, rows[0].month)
+    return {"snapshots": [_snapshot_dict(r) for r in rows], "risk": risk}
 
 
 @router.get("/categories")

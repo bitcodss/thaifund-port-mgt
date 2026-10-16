@@ -97,6 +97,8 @@ class FundFactsheet(Base):
     aimc_category_raw: Mapped[str | None] = mapped_column(String(150), nullable=True)
     aimc_category: Mapped[str | None] = mapped_column(String(150), nullable=True, index=True)  # official name
     fx_hedge_pct: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)  # actual, when printed
+    # hedge policy wording on the factsheet (unhedged|full|dynamic|partial) — fallback for an empty SEC field
+    fx_hedge_policy: Mapped[str | None] = mapped_column(String(12), nullable=True)
     scan_status: Mapped[str] = mapped_column(String(20), nullable=False, default="ok")  # ok|no_factsheet|error
     # Provenance: which parser produced the stored holdings / AIMC category, and when. A protected
     # re-parse keeps older data when the new result is worse, so these can differ per field group.
@@ -131,6 +133,7 @@ class PeerProfile(Base):
     master_key: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
     representative_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     hedge_group: Mapped[str | None] = mapped_column(String(12), nullable=True)      # unhedged|full|dynamic|partial|domestic|unknown
+    hedge_source: Mapped[str | None] = mapped_column(String(12), nullable=True)     # sec|factsheet
     input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -140,3 +143,57 @@ class PeerProfile(Base):
     theme_status: Mapped[str | None] = mapped_column(String(12), nullable=True)   # agreed|review|manual|rule|fixed
     theme_input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     classifier_input: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class FxRate(Base):
+    """Daily FX closes (Yahoo) for the FX effect on foreign funds. pair e.g. "USDTHB"."""
+    __tablename__ = "fx_rates"
+
+    pair: Mapped[str] = mapped_column(String(10), primary_key=True)
+    trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    rate: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+
+
+class PeerSnapshot(Base):
+    """
+    Month-end peer comparison of one SEC project (its representative class). Returns are
+    NAV price returns. `backfilled` rows were computed later from stored NAV using the peer
+    lists as they were at computation time, not as they were in that month.
+    `flag_eligible`: only a theme-basis comparison may raise the bottom-quartile flag.
+    """
+    __tablename__ = "peer_snapshots"
+    __table_args__ = (UniqueConstraint("sec_proj_id", "month", name="uq_peer_snapshot_month"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    sec_proj_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    month: Mapped[date] = mapped_column(Date, nullable=False, index=True)        # month-end date
+    nav_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    aimc_category: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    peer_theme: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    basis: Mapped[str | None] = mapped_column(String(10), nullable=True)          # theme|category
+    flag_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    hedge_group: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    hedge_basis: Mapped[str | None] = mapped_column(String(12), nullable=True)    # same_hedge|fx_adjusted
+    peer_masters: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fx_adjusted_masters: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ret_1m: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    ret_3m: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    ret_6m: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    ret_1y: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    median_1m: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    median_3m: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    median_6m: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    median_1y: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    pct_1m: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)   # 0 = worst, 100 = best
+    pct_3m: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    pct_6m: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    pct_1y: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    z_1m: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)    # vs own history
+    z_3m: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    fx_effect_1m: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    fx_effect_3m: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    hedge_ratio: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    hedge_ratio_estimated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    details: Mapped[dict | None] = mapped_column(JSON, nullable=True)   # same-master feeders, peer list
+    backfilled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

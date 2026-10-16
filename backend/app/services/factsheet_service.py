@@ -203,6 +203,32 @@ def parse_fx_hedge_pct(text: str) -> Decimal | None:
     return Decimal(m.group(1)) if m else None
 
 
+# Thai vowel / tone marks — PDF text drops or doubles them inconsistently ("ไมปองกัน",
+# "กํารป้องกันควํามเสี่ยง"), so the hedge label is matched on a skeleton without them.
+_THAI_MARKS = re.compile("[\u0e31\u0e34-\u0e3a\u0e47-\u0e4e]")
+_HEDGE_LABEL = re.compile(r"การปองกนความเสยง(?:\s*\(?FX\)?)?\s*:?\s+(?!จาก)(\S.*)$", re.M)
+_HEDGE_VALUES = (("unhedged", re.compile(r"^ไมปองกน|unhedged", re.I)),
+                 ("full", re.compile(r"^(?:ปองกน)?ทงหมด|fully", re.I)),
+                 ("dynamic", re.compile(r"ดลย?พน|dynamic", re.I)),
+                 ("partial", re.compile(r"บางสวน|partial", re.I)))
+
+
+def parse_fx_hedge_policy(text: str) -> str | None:
+    """
+    Hedge policy from the factsheet's "การป้องกันความเสี่ยง FX" label (unhedged / full /
+    dynamic / partial). Fallback for funds whose SEC profile leaves the policy empty.
+    None when absent or when classes print different policies.
+    """
+    found = set()
+    for m in _HEDGE_LABEL.finditer(_THAI_MARKS.sub("", text)):
+        value = m.group(1)
+        for name, rx in _HEDGE_VALUES:
+            if rx.search(value[:40]):
+                found.add(name)
+                break
+    return found.pop() if len(found) == 1 else None
+
+
 def parse_fields(text: str) -> dict:
     parsed = parse_top_holdings(text)
     raw_cat = parse_aimc_category(text)
@@ -216,6 +242,7 @@ def parse_fields(text: str) -> dict:
         "aimc_category_raw": raw_cat,
         "aimc_category": canonical_category(raw_cat),
         "fx_hedge_pct": parse_fx_hedge_pct(text),
+        "fx_hedge_policy": parse_fx_hedge_policy(text),
     }
 
 
@@ -275,7 +302,7 @@ def apply_parsed(stored: FundFactsheet, text: str, same_document: bool = False) 
                                        _stock_rows(new["holdings_scope"], new["holdings"]))
         if outcome["holdings"] == "worse":
             keep |= set(_HOLDINGS_FIELDS)
-    for field in ("aimc_category", "fx_hedge_pct"):
+    for field in ("aimc_category", "fx_hedge_pct", "fx_hedge_policy"):
         old_has, new_has = getattr(stored, field) is not None, new[field] is not None
         if same_document:
             outcome[field] = _compare(old_has, new_has)
