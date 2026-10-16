@@ -58,6 +58,8 @@ class TestParsing:
         ("• กลุ่มกองทนรวม: Health Care                    7 : เสยงสง", "Health Care"),
         ("        กลุม Asia Pacific Ex Japan                      *ความเสี่ยง", "Asia Pacific Ex Japan"),
         ("• กลุมกองทุน : Technology Equity", "Technology Equity"),
+        ("• | กลุ่่ม� China Equity - A Shares", "China Equity - A Shares"),      # abrdn: doubled marks + U+FFFD
+        ("▪ กลุม่ Japan Equity            ลงทุนในตราสารทุน", "Japan Equity"),  # XSpring: mark after ม
     ])
     def test_aimc_category_layouts(self, line, expected):
         assert fs.parse_aimc_category("ประเภทกองทุนรวม / กลุ่มกองทุนรวม\n" + line + "\n") == expected
