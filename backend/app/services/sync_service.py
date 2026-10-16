@@ -225,6 +225,9 @@ async def sync_fund_metadata(db: AsyncSession) -> dict:
             fund.fund_status = _fund_status_code(fdata.get("fund_status"))
             # FX-hedge policy for every fund (peer comparison needs it market-wide)
             fund.fx_hedge = fdata.get("exchange_rate_protection_policy") or fund.fx_hedge
+            # master fund + style market-wide: peer theme input and one-per-master dedup
+            fund.master_fund = fdata.get("feederfund_master_fund") or fund.master_fund
+            fund.management_style = fdata.get("management_style") or fund.management_style
             fund.last_synced_at = datetime.now(timezone.utc)
 
     # ── Enrich asset_class + risk_level via /policy and /performance ──────────
@@ -313,12 +316,33 @@ async def sync_nav_for_date(db: AsyncSession, nav_date: date, proj_ids: set[str]
     return await _sync_nav(db, nav_date, nav_date, proj_ids, f"nav_sync:{nav_date}")
 
 
-async def sync_nav_range(db: AsyncSession, start_date: date, end_date: date, proj_ids: set[str] | None = None) -> dict:
+async def sync_nav_range(db: AsyncSession, start_date: date, end_date: date, proj_ids: set[str] | None = None,
+                         skip_covered: bool = False) -> dict:
     """
     Backfill NAV history for [start_date, end_date] — one paginated SEC call per
     fund for the whole range (weekends/holidays are simply absent from the data).
+    skip_covered: skip projects whose stored NAV already spans the range (within
+    COVERED_SLACK_DAYS at each end) — makes a market-wide backfill resumable.
     """
-    return await _sync_nav(db, start_date, end_date, proj_ids, f"nav_backfill:{start_date}:{end_date}")
+    return await _sync_nav(db, start_date, end_date, proj_ids, f"nav_backfill:{start_date}:{end_date}",
+                           skip_covered=skip_covered)
+
+
+COVERED_SLACK_DAYS = 7   # holidays / late publication at either end of a range
+
+
+async def _covered_projects(db: AsyncSession, start_date: date, end_date: date) -> set[str]:
+    from datetime import timedelta
+    from sqlalchemy import func
+    rows = await db.execute(
+        select(Fund.sec_proj_id, func.min(NavHistory.trade_date), func.max(NavHistory.trade_date))
+        .join(NavHistory, NavHistory.fund_code == Fund.fund_code)
+        .where(Fund.sec_proj_id.isnot(None), NavHistory.trade_date >= start_date - timedelta(days=COVERED_SLACK_DAYS))
+        .group_by(Fund.sec_proj_id)
+    )
+    return {p for p, lo, hi in rows.all()
+            if lo <= start_date + timedelta(days=COVERED_SLACK_DAYS)
+            and hi >= end_date - timedelta(days=COVERED_SLACK_DAYS)}
 
 
 async def _sync_nav(
@@ -327,6 +351,7 @@ async def _sync_nav(
     end_date: date,
     proj_ids: set[str] | None,
     job_type: str,
+    skip_covered: bool = False,
 ) -> dict:
     key = settings.SEC_API_KEY
     if not key:
@@ -346,7 +371,7 @@ async def _sync_nav(
     await db.commit()  # make the job visible immediately
     synced = skipped = 0
     errors: list[str] = []
-    seen_proj_ids: set[str] = set()
+    seen_proj_ids: set[str] = await _covered_projects(db, start_date, end_date) if skip_covered else set()
 
     for fund in funds:
         if fund.sec_proj_id in seen_proj_ids:
@@ -397,6 +422,19 @@ async def _upsert_nav_entries(db: AsyncSession, fund: Fund, entries: list[dict])
     # SEC returns rows unsorted; change_pct needs each class in date order.
     rows.sort(key=lambda r: (r[0], r[1]))
     prev_nav: dict[str, Decimal | None] = {}
+    if not rows:
+        return 0
+
+    # Load existing rows and class funds once per project instead of one query per row —
+    # a market-wide backfill writes ~1M rows.
+    codes = {r[0] for r in rows}
+    existing_navs = {(n.fund_code, n.trade_date): n for n in (await db.execute(
+        select(NavHistory).where(NavHistory.fund_code.in_(codes),
+                                 NavHistory.trade_date >= min(r[1] for r in rows),
+                                 NavHistory.trade_date <= max(r[1] for r in rows))
+    )).scalars()}
+    class_funds = {f.fund_code: f for f in (await db.execute(
+        select(Fund).where(Fund.fund_code.in_(codes)))).scalars()}
 
     for nav_code, nav_date, nav_dec in rows:
         if nav_code not in prev_nav:
@@ -415,7 +453,7 @@ async def _upsert_nav_entries(db: AsyncSession, fund: Fund, entries: list[dict])
         prev_nav[nav_code] = nav_dec
 
         # Auto-create a Fund record for this class if it doesn't exist yet
-        class_fund = await db.get(Fund, nav_code)
+        class_fund = class_funds.get(nav_code)
         if class_fund is None:
             class_fund = Fund(
                 fund_code=nav_code,
@@ -428,19 +466,21 @@ async def _upsert_nav_entries(db: AsyncSession, fund: Fund, entries: list[dict])
             )
             db.add(class_fund)
             await db.flush()
+            class_funds[nav_code] = class_fund
 
         # Upsert nav_history for this class
-        existing = await db.get(NavHistory, (nav_code, nav_date))
+        existing = existing_navs.get((nav_code, nav_date))
         if existing:
             existing.nav = nav_dec
             existing.change_pct = change_pct
         else:
-            db.add(NavHistory(
+            existing_navs[(nav_code, nav_date)] = row = NavHistory(
                 fund_code=nav_code,
                 trade_date=nav_date,
                 nav=nav_dec,
                 change_pct=change_pct,
-            ))
+            )
+            db.add(row)
 
         if class_fund.last_nav_date is None or nav_date > class_fund.last_nav_date:
             class_fund.last_nav_date = nav_date

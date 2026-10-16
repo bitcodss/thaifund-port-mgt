@@ -545,3 +545,21 @@ class TestFactsheetParsing:
         from app.services.factsheet_service import parse_top_holdings
         text = "ทรพยสนทลงทน 5 อนดบแรก\n      Eli Lilly & Co        9.16\n      AbbVie Inc       4.63\n"
         assert [r["name"] for r in parse_top_holdings(text)["rows"]] == ["Eli Lilly & Co", "AbbVie Inc"]
+
+
+@pytest.mark.asyncio
+async def test_nav_backfill_skip_covered_is_resumable(db):
+    from app.services import sync_service
+    from app.models.fund import NavHistory
+    db.add_all([Fund(fund_code="DONE", sec_proj_id="P_DONE", fund_status="RG"),
+                Fund(fund_code="GAP", sec_proj_id="P_GAP", fund_status="RG")])
+    for d in (date(2025, 10, 1), date(2026, 10, 14)):
+        db.add(NavHistory(fund_code="DONE", trade_date=d, nav=Decimal("10")))
+    db.add(NavHistory(fund_code="GAP", trade_date=date(2026, 10, 14), nav=Decimal("10")))   # no early history
+    await db.commit()
+    fetch = AsyncMock(return_value=[])
+    with patch("app.services.sync_service.settings") as s, \
+            patch("app.services.sec_api.get_nav_range", new=fetch):
+        s.SEC_API_KEY = "k"
+        await sync_service.sync_nav_range(db, date(2025, 10, 1), date(2026, 10, 15), skip_covered=True)
+    assert [c.args[1] for c in fetch.await_args_list] == ["P_GAP"]
