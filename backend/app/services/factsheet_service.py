@@ -42,6 +42,7 @@ _END = re.compile(r"หม\S{0,3}ายเหต|Weblink|ISIN")
 # Thai prose on the same layout line never becomes part of it.
 _ROW = re.compile(r"(?:^|\s{2,})(\S(?:(?!\s{2}).){1,90}?)\s{2,}(-?\d{1,3}\.\d{1,2})\s*%?\s*$")
 _NAME_START = re.compile(r"[A-Za-z\u0e00-\u0e7f]")
+_THAI_DEPOSIT = re.compile(r"เง\S{0,2}นฝาก|ใบแสดงส\S{0,2}ทธ")   # deposit / depositary-receipt row prefixes
 # Thai table filler that lands in the weight column: other assets, deposits, fees, page text
 _THAI_FILLER = re.compile(r"อ\S{0,2}น\s*ๆ|อ\S{0,2}น$|เง\S{0,2}นฝาก|ค\S{0,2}าธรรมเน|หน\S{0,2}า\s*\d|ลดลง|จร\S{0,2}ง$")
 # "5 อันดับแรก" headings of allocation tables (industry / country / credit rating) — not holdings
@@ -59,7 +60,7 @@ _COMPANY_HINT = re.compile(r"\b(Inc|Corp|Corporation|Co|Ltd|Limited|plc|PLC|Hold
                            r"บมจ|บร\S{0,2}ษ\S{0,2}ท|ธ\S{0,2}นาค|พ\S{0,2}นธ\S{0,2}บ\S{0,2}ต|ห\S{0,2}นก\S{0,2}|"
                            r"ต\S{0,3}วแลกเง|\b[A-Z]{2,5}\d{2,}(?:/\d+)?\b", re.I)
 # Fund / ETF units and depositary receipts ("ใบแสดงสิทธิในผลประโยชน์ E1VFVN30") — not stock-level holdings
-_FUND_UNIT = re.compile(r"\b(FUND|ETF|PORTFOLIO|SICAV|UCITS|TRUST)\b|หน\S{0,2}วยลงท\S{0,2}น|กองท\S{0,2}น|"
+_FUND_UNIT = re.compile(r"\b(FUNDS?|ETFS?|PORTFOLIO|SICAV|UCITS|TRUST|ISHARES|SPDR|VANGUARD|XTRACKERS|AMUNDI)\b|หน\S{0,2}วยลงท\S{0,2}น|กองท\S{0,2}น|"
                         r"ใบแสดงส\S{0,2}ทธ", re.I)
 
 
@@ -72,42 +73,14 @@ def parse_top_holdings(text: str) -> dict | None:
     lines = text.split("\n")
     blocks = []
     for i, line in enumerate(lines):
-        m = _ANCHOR.search(line)
-        if not m or _ALLOCATION_ANCHOR.search(line):
-            continue
-        col = max(0, m.start() - 45)
-        rows = []
-        for nxt in lines[i + 1: i + 16]:
-            if _ANCHOR.search(nxt):
-                break   # next "5 อันดับ" table starts — don't merge two tables into one block
-            seg = nxt[col:] if len(nxt) > col else ""
-            if rows and _END.search(seg):
-                break
-            r = _ROW.search(seg)
-            if not r:
-                continue
-            # strip a left-column value glued on with one space ("96.19 NVIDIA CORP")
-            name = re.sub(r"^[-−]?\d[\d.,]*\s+", "", r.group(1).strip())
-            if _THAI_FILLER.search(name) or (_FUND_UNIT.search(name) and re.match(r"[\u0e00-\u0e7f]", name)):
-                # judged BEFORE stripping a Thai prefix: "เงินฝาก The Bank of New York Mellon" is a deposit,
-                # "ใบแสดงสิทธิ… E1VFVN30" a depositary receipt — keep them as fund units / drop them
-                if not _FUND_UNIT.search(name):
-                    continue
-                rows.append({"name": name, "pct": float(r.group(2))})
-                continue
-            latin = re.search(r"[A-Za-z]", name)
-            if latin and re.match(r"[\u0e00-\u0e7f]", name):
-                # Thai text in front of a Latin name is left-column bleed ("หน TENCENT…",
-                # "…ผลตอบแทนลดลง NVIDIA CORP") — Thai holding names don't start Thai then switch
-                name = name[latin.start():]
-            if _NAME_START.match(name) and not _ALLOCATION_ROW.match(name) and not _THAI_FILLER.search(name):
-                rows.append({"name": name, "pct": float(r.group(2))})
-        if rows:
-            # a block can mix the feeder's own fund-unit row with the master's securities
-            # (>= 50% of NAV in one line is a fund unit even when the name is cut off)
-            securities = [r for r in rows if not _FUND_UNIT.search(r["name"]) and r["pct"] < 50]
-            context = " ".join(lines[max(0, i - 1): i + 16])
-            blocks.append({"rows": (securities or rows)[:5], "master": bool(_MASTER_HINT.search(context))})
+        for m in _ANCHOR.finditer(line):
+            # judge the heading by its own cell, not the whole line: a holdings heading can
+            # share a layout line with an allocation-table title in another column
+            cell_start = max((g.end() for g in re.finditer(r"\s{3,}", line[:m.start()])), default=0)
+            if not _ALLOCATION_ANCHOR.search(line[cell_start:m.end()]):
+                block = _read_block(lines, i, m)
+                if block:
+                    blocks.append(block)
     if not blocks:
         return None
 
@@ -117,6 +90,50 @@ def parse_top_holdings(text: str) -> dict | None:
         return (companies, b["master"], len(b["rows"]))
     best = max(blocks, key=score)
     return best if score(best)[0] > 0 else {"rows": best["rows"], "master": best["master"], "fund_units_only": True}
+
+
+def _read_block(lines: list[str], i: int, m: re.Match) -> dict | None:
+    """Rows under the "5 อันดับ" heading at lines[i] (match m), read in that heading's column."""
+    col = max(0, m.start() - 45)
+    rows = []
+    for nxt in lines[i + 1: i + 16]:
+        nm = _ANCHOR.search(nxt)
+        if nm and abs(nm.start() - m.start()) < 40:
+            break   # next "5 อันดับ" table starts in this column — don't merge two tables
+        seg = nxt[col:] if len(nxt) > col else ""
+        if rows and _END.search(seg):
+            break
+        r = _ROW.search(seg)
+        if not r:
+            continue
+        # strip a left-column value glued on with one space ("96.19 NVIDIA CORP", "% Eli Lilly & Co.")
+        name = re.sub(r"^[-−%\d.,]+\s+", "", r.group(1).strip())
+        latin = re.search(r"[A-Za-z]", name)
+        if latin and re.match(r"[฀-๿]", name):
+            # Thai text in front of a Latin name is either this row's instrument type
+            # ("เงินฝาก The Bank of New York Mellon", "ใบแสดงสิทธิ… E1VFVN30", "หน่วยลงทุน PIMCO…")
+            # or left-column prose bleeding in ("…ค่าธรรมเนียม Eli Lilly & Co.", "หน TENCENT…").
+            # Only the word right before the name decides the row; prose is stripped.
+            words = name[:latin.start()].split()
+            prefix_word = words[-1] if words else ""
+            if _THAI_DEPOSIT.search(prefix_word):
+                continue
+            if _FUND_UNIT.search(prefix_word):
+                rows.append({"name": name, "pct": float(r.group(2))})
+                continue
+            name = name[latin.start():]
+        elif _FUND_UNIT.search(name) and re.match(r"[฀-๿]", name):
+            rows.append({"name": name, "pct": float(r.group(2))})   # Thai-named fund unit
+            continue
+        if _NAME_START.match(name) and not _ALLOCATION_ROW.match(name) and not _THAI_FILLER.search(name):
+            rows.append({"name": name, "pct": float(r.group(2))})
+    if rows:
+        # a block can mix the feeder's own fund-unit row with the master's securities
+        # (>= 50% of NAV in one line is a fund unit even when the name is cut off)
+        securities = [r for r in rows if not _FUND_UNIT.search(r["name"]) and r["pct"] < 50]
+        context = " ".join(lines[max(0, i - 1): i + 16])
+        return {"rows": (securities or rows)[:5], "master": bool(_MASTER_HINT.search(context))}
+    return None
 
 
 _PRIVATE_USE = re.compile("[\ue000-\uf8ff]")   # glyphs pdftotext couldn't map (broken Thai fonts)
@@ -197,8 +214,34 @@ def parse_fields(text: str) -> dict:
     }
 
 
-def _stock_rows(scope: str | None, holdings: list | None) -> int:
-    return len(holdings or []) if scope in ("master", "fund") else 0
+_RATING = re.compile(r"^(AAA|AA|A|BBB|BB|B|GOV|unrated|NAV)\b", re.I)
+
+
+def is_security_name(name: str) -> bool:
+    """A row name that looks like a real security (not a fund unit, ETF, deposit, allocation
+    label, credit rating or a truncated fragment like "LTD" / "i Group")."""
+    n = (name or "").strip()
+    thai = bool(re.match(r"[\u0e00-\u0e7f]", n))
+    if not thai and (len(n) < 4 or not n[0].isupper()):
+        return False
+    return not (_FUND_UNIT.search(n) or _ALLOCATION_ROW.match(n) or _RATING.match(n)
+                or _THAI_DEPOSIT.search(n) or _THAI_FILLER.search(n)
+                or re.fullmatch(r"(LTD|INC|CORP|PLC|CO|GROUP)\.?", n, re.I))
+
+
+def _name_key(name: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", re.sub(r"[\u0e00-\u0e7f]", "", name or "").upper())[:12]
+
+
+def _stock_rows(scope: str | None, holdings: list | None, known_units: set[str] = frozenset()) -> int:
+    """Quality of a stored/parsed holdings block: rows that look like real securities.
+    Old and new results are judged by the SAME rules, so junk the old parser accepted
+    (fund units, ratings, "NAV Industrials") doesn't count as data worth keeping."""
+    if scope not in ("master", "fund"):
+        return 0
+    return sum(1 for h in holdings or []
+               if is_security_name(h.get("name")) and (h.get("pct") or 0) < 50
+               and _name_key(h.get("name")) not in known_units)
 
 
 def _compare(old, new) -> str:
@@ -220,7 +263,10 @@ def apply_parsed(stored: FundFactsheet, text: str, same_document: bool = False) 
     outcome: dict[str, str] = {}
     keep: set[str] = set()
     if same_document:
-        outcome["holdings"] = _compare(_stock_rows(stored.holdings_scope, stored.holdings),
+        # rows the NEW parse identified as fund units ("หน่วยลงทุน PIMCO GIS INCOME") don't count
+        # as old stock data either — the old Latin-only parser just couldn't see the Thai prefix
+        units = {_name_key(h["name"]) for h in new["holdings"] or [] if _FUND_UNIT.search(h["name"])}
+        outcome["holdings"] = _compare(_stock_rows(stored.holdings_scope, stored.holdings, units),
                                        _stock_rows(new["holdings_scope"], new["holdings"]))
         if outcome["holdings"] == "worse":
             keep |= set(_HOLDINGS_FIELDS)

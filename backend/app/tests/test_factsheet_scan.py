@@ -302,3 +302,36 @@ class TestReparseKeepsBetterData:
         assert r["error"] == 1
         row = await db.get(FundFactsheet, "P1")
         assert row.scan_status == "ok" and row.holdings and "503" in row.scan_error
+
+
+def test_holdings_heading_sharing_a_line_with_rating_table_title():
+    """M0057: "ทรัพย์สินที่ลงทุนสูงสุด 5 อันดับแรก" and "…ตามอันดับความน่าเชื่อถือ" on one layout line."""
+    parsed, issue = _rows("asean_rating_on_same_line")
+    names = [r["name"] for r in parsed["rows"]]
+    assert issue is None
+    assert names[:2] == ["DBS Group Holdings Ltd", "Oversea-Chinese Banking"]
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("Eli Lilly & Co.", True), ("บมจ.ปตท.", True), ("Public Bank Berhad", True), ("CB26O15A 15/10/2026", True),
+    ("LTD", False), ("i Group", False), ("NAV          Industrials", False), ("AA", False), ("GOV Bond/AAA", False),
+    ("หนวยลงทน PIMCO GIS", False), ("ISHARES MSCI JAPAN", False), ("Man Funds PLC - Man", False),
+])
+def test_is_security_name(name, expected):
+    assert fs.is_security_name(name) is expected
+
+
+@pytest.mark.asyncio
+async def test_old_junk_is_not_protected_by_the_merge(db):
+    """Old parser stored fund units as 'stocks'; the new parse (correctly fund_units) must replace it."""
+    await _seed(db, "P1")
+    db.add(FundFactsheet(sec_proj_id="P1", pdf_url="https://pdf", as_of=date(2026, 9, 30), text_hash="h",
+                         scan_status="ok", holdings_scope="fund",
+                         holdings=[{"name": "PIMCO GIS INCOME", "pct": 30}, {"name": "ISHARES 7-10 YEAR", "pct": 20}]))
+    await db.commit()
+    units = "ทรัพย์สินที่ลงทุน 5 อันดับแรก\n   หน่วยลงทุน PIMCO GIS INCOME        30.00\n"
+    a, b, c = _patches(latest=("https://pdf", date(2026, 9, 30)), text=units)
+    with a, b, c:
+        r = await fs.scan_factsheets(db, force=True)
+    assert r["reparse"]["holdings"] == {"better": 0, "same": 1, "worse": 0}   # 0 real securities either way
+    assert (await db.get(FundFactsheet, "P1")).holdings_scope == "fund_units"

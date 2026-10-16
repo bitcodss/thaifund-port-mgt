@@ -532,8 +532,9 @@ class TestFactsheetParsing:
         from app.services.factsheet_service import parse_top_holdings
         text = ("x 5 อันดับแรก\n"
                 "                    96.19 NVIDIA CORP                              9.97\n"
-                "ือหนี้สินอื่น       -0.14 APPLE INC                                9.83\n")
-        assert [r["name"] for r in parse_top_holdings(text)["rows"]] == ["NVIDIA CORP", "APPLE INC"]
+                "ือหนี้สินอื่น       -0.14 APPLE INC                                9.83\n"
+                "                    % Eli Lilly & Co.                              9.39%\n")
+        assert [r["name"] for r in parse_top_holdings(text)["rows"]] == ["NVIDIA CORP", "APPLE INC", "Eli Lilly & Co."]
 
     def test_thai_fund_unit_row_is_a_fund_unit(self):
         from app.services.factsheet_service import parse_top_holdings
