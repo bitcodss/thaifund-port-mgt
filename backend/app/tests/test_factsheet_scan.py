@@ -104,7 +104,7 @@ class TestScan:
         with a, b, c:
             first = await fs.scan_factsheets(db)
             second = await fs.scan_factsheets(db)
-        assert first == {"scanned": 2, "ok": 2, "no_factsheet": 0, "error": 0}
+        assert first == {"scanned": 2, "ok": 2, "no_factsheet": 0, "error": 0, "reparse": {}}
         assert second["scanned"] == 0                              # checkpointed — nothing re-downloaded
         row = await db.get(FundFactsheet, "P1")
         assert (row.aimc_category, row.as_of, row.scan_status) == ("Japan Equity", date(2026, 9, 30), "ok")
@@ -183,3 +183,120 @@ async def test_scan_can_be_restricted_to_projects(db):
         r = await fs.scan_factsheets(db, force=True, proj_ids={"P2"})
     assert r["scanned"] == 1
     assert await db.get(FundFactsheet, "P1") is None and await db.get(FundFactsheet, "P2") is not None
+
+
+# ── regression: real factsheet excerpts of Thai-named feeders ────────────────
+# Fund-unit rows written in Thai ("หน่วยลงทุน กองทุนเปิด…", "กองทุนเปิดเค เวียดนาม หุ้นทุน")
+# must stay fund units (≥50% NAV / fund-unit name), never become stock names, and
+# deposits / depositary receipts must not become holdings.
+
+from pathlib import Path
+
+FIXTURES = Path(__file__).parent / "fixtures" / "factsheets"
+_UNIT_WORDS = ("กองทุน", "กองทน", "หน่วยลงทุน", "หนวยลงทน", "Portfolio", "ETF", "เงินฝาก", "ใบแสดงสิทธิ")
+
+
+def _rows(name):
+    text = (FIXTURES / f"{name}.txt").read_text()
+    parsed = fs.parse_top_holdings(text)
+    return parsed, fs.holdings_issue(text, parsed)
+
+
+@pytest.mark.parametrize("name", ["scbrmviet", "k_vietnamrmf", "k_india", "scbrmmoney", "scbrmmlca"])
+def test_thai_named_feeder_units_never_become_holdings(name):
+    parsed, _ = _rows(name)
+    for r in parsed["rows"]:
+        assert r["pct"] < 50, r
+        assert not any(w in r["name"] for w in _UNIT_WORDS), r
+
+
+def test_k_vietnamrmf_master_top5_without_own_depositary_receipt():
+    parsed, issue = _rows("k_vietnamrmf")
+    names = [r["name"] for r in parsed["rows"]]
+    assert issue is None and parsed["master"]
+    assert "E1VFVN30" not in " ".join(names)                     # fund's own DR, from the other table
+    assert names[0] == "Mobile World Investment Corp"
+
+
+def test_k_india_deposit_is_not_a_holding():
+    parsed, _ = _rows("k_india")
+    names = [r["name"] for r in parsed["rows"]]
+    assert not any("Bank of New York Mellon" in n for n in names)
+    assert names[:2] == ["ICICI Bank Ltd", "HDFC Bank Ltd"]
+
+
+def test_scbrmviet_master_holdings():
+    parsed, issue = _rows("scbrmviet")
+    assert issue is None
+    assert [r["name"] for r in parsed["rows"]][:2] == ["VINGROUP JSC", "VIETNAM TECHNOLOGICAL AND"]
+
+
+def test_scbrmmoney_bills_and_bonds_are_holdings_not_fund_units():
+    parsed, issue = _rows("scbrmmoney")
+    assert issue is None                                          # garbled Thai bill/bond names still count
+    assert any("FRB" in r["name"] for r in parsed["rows"])
+
+
+# ── re-parse must never lose data ─────────────────────────────────────────────
+
+GOOD = ("x\n• กลุม Technology Equity    y\nFX Hedging 80.00 %\n"
+        "ทรัพย์สินที่ลงทุน 5 อันดับแรกของกองทุนหลัก\n   NVIDIA CORP          11.31\n   BROADCOM INC        10.22\n")
+WORSE = "x\nnothing parseable here\n"
+
+
+class TestReparseKeepsBetterData:
+
+    @pytest.mark.asyncio
+    async def test_same_document_worse_result_keeps_stored_and_is_counted(self, db):
+        await _seed(db, "P1")
+        a, b, c = _patches(latest=("https://pdf", date(2026, 9, 30)), text=GOOD)
+        with a, b, c:
+            await fs.scan_factsheets(db)
+        a, b, c = _patches(latest=("https://pdf", date(2026, 9, 30)), text=WORSE)
+        with a, b, c:
+            r = await fs.scan_factsheets(db, force=True)
+        assert r["reparse"]["holdings"] == {"better": 0, "same": 0, "worse": 1}
+        assert r["reparse"]["aimc_category"]["worse"] == 1 and r["reparse"]["fx_hedge_pct"]["worse"] == 1
+        row = await db.get(FundFactsheet, "P1")
+        assert [h["name"] for h in row.holdings] == ["NVIDIA CORP", "BROADCOM INC"]
+        assert (row.aimc_category, row.fx_hedge_pct) == ("Technology Equity", Decimal("80.00"))
+
+    @pytest.mark.asyncio
+    async def test_same_document_better_result_is_taken(self, db):
+        await _seed(db, "P1")
+        a, b, c = _patches(latest=("https://pdf", date(2026, 9, 30)), text=WORSE)
+        with a, b, c:
+            await fs.scan_factsheets(db)
+        a, b, c = _patches(latest=("https://pdf", date(2026, 9, 30)), text=GOOD)
+        with a, b, c:
+            r = await fs.scan_factsheets(db, force=True)
+        assert r["reparse"]["holdings"] == {"better": 1, "same": 0, "worse": 0}
+        assert (await db.get(FundFactsheet, "P1")).holdings_scope == "master"
+
+    @pytest.mark.asyncio
+    async def test_newer_document_replaces_holdings_but_keeps_category(self, db):
+        await _seed(db, "P1")
+        a, b, c = _patches(latest=("https://pdf", date(2026, 8, 31)), text=GOOD)
+        with a, b, c:
+            await fs.scan_factsheets(db)
+        a, b, c = _patches(latest=("https://pdf2", date(2026, 9, 30)), text=WORSE)
+        with a, b, c:
+            r = await fs.scan_factsheets(db, force=True)
+        assert r["reparse"] == {}                                      # not a re-parse of the same document
+        row = await db.get(FundFactsheet, "P1")
+        assert row.holdings is None and row.as_of == date(2026, 9, 30)   # newer factsheet wins for holdings
+        assert row.aimc_category == "Technology Equity"                  # category kept when the new one is blank
+        assert row.fx_hedge_pct is None                                  # hedge % is per-document: no stale value
+
+    @pytest.mark.asyncio
+    async def test_failed_redownload_keeps_parsed_row(self, db):
+        await _seed(db, "P1")
+        a, b, c = _patches(latest=("https://pdf", None), text=GOOD)
+        with a, b, c:
+            await fs.scan_factsheets(db)
+        a, b, c = _patches(latest_side=[SecApiError("HTTP 503")])
+        with a, b, c:
+            r = await fs.scan_factsheets(db, force=True)
+        assert r["error"] == 1
+        row = await db.get(FundFactsheet, "P1")
+        assert row.scan_status == "ok" and row.holdings and "503" in row.scan_error

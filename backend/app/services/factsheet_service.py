@@ -55,8 +55,12 @@ _ALLOCATION_ROW = re.compile(
     r"UTILITIES|REAL ESTATE|COMMUNICATION SERVICES|CONSUMER (DISCRETIONARY|STAPLES|DUR\S*))$", re.I)
 _COMPANY_HINT = re.compile(r"\b(Inc|Corp|Corporation|Co|Ltd|Limited|plc|PLC|Holdings?|Group|AG|SA|NV|ASA|"
                            r"KGaA|SE|Bhd|Tbk|Class [A-Z]|[A-Z]{1,5} (US|UW|UN|UQ))\b\.?|"
-                           r"บมจ|บริษัท|ธนาคาร|พันธบัตร|หุ้นกู้|ตั๋ว", re.I)
-_FUND_UNIT = re.compile(r"\b(FUND|ETF|PORTFOLIO|SICAV|UCITS|TRUST)\b|หน\S{0,2}วยลงท\S{0,2}น|กองท\S{0,2}นรวม", re.I)
+                           # Thai issuers/instruments, tolerant of pdftotext's dropped vowels
+                           r"บมจ|บร\S{0,2}ษ\S{0,2}ท|ธ\S{0,2}นาค|พ\S{0,2}นธ\S{0,2}บ\S{0,2}ต|ห\S{0,2}นก\S{0,2}|"
+                           r"ต\S{0,3}วแลกเง|\b[A-Z]{2,5}\d{2,}(?:/\d+)?\b", re.I)
+# Fund / ETF units and depositary receipts ("ใบแสดงสิทธิในผลประโยชน์ E1VFVN30") — not stock-level holdings
+_FUND_UNIT = re.compile(r"\b(FUND|ETF|PORTFOLIO|SICAV|UCITS|TRUST)\b|หน\S{0,2}วยลงท\S{0,2}น|กองท\S{0,2}น|"
+                        r"ใบแสดงส\S{0,2}ทธ", re.I)
 
 
 def parse_top_holdings(text: str) -> dict | None:
@@ -74,6 +78,8 @@ def parse_top_holdings(text: str) -> dict | None:
         col = max(0, m.start() - 45)
         rows = []
         for nxt in lines[i + 1: i + 16]:
+            if _ANCHOR.search(nxt):
+                break   # next "5 อันดับ" table starts — don't merge two tables into one block
             seg = nxt[col:] if len(nxt) > col else ""
             if rows and _END.search(seg):
                 break
@@ -82,6 +88,13 @@ def parse_top_holdings(text: str) -> dict | None:
                 continue
             # strip a left-column value glued on with one space ("96.19 NVIDIA CORP")
             name = re.sub(r"^[-−]?\d[\d.,]*\s+", "", r.group(1).strip())
+            if _THAI_FILLER.search(name) or (_FUND_UNIT.search(name) and re.match(r"[\u0e00-\u0e7f]", name)):
+                # judged BEFORE stripping a Thai prefix: "เงินฝาก The Bank of New York Mellon" is a deposit,
+                # "ใบแสดงสิทธิ… E1VFVN30" a depositary receipt — keep them as fund units / drop them
+                if not _FUND_UNIT.search(name):
+                    continue
+                rows.append({"name": name, "pct": float(r.group(2))})
+                continue
             latin = re.search(r"[A-Za-z]", name)
             if latin and re.match(r"[\u0e00-\u0e7f]", name):
                 # Thai text in front of a Latin name is left-column bleed ("หน TENCENT…",
@@ -167,18 +180,61 @@ def parse_fx_hedge_pct(text: str) -> Decimal | None:
     return Decimal(m.group(1)) if m else None
 
 
-def apply_parsed(stored: FundFactsheet, text: str) -> None:
+def parse_fields(text: str) -> dict:
     parsed = parse_top_holdings(text)
     raw_cat = parse_aimc_category(text)
-    stored.text_hash = hashlib.sha256(text.encode()).hexdigest()
-    stored.holdings = parsed["rows"] if parsed else None
-    stored.holdings_scope = (None if not parsed else "fund_units" if parsed.get("fund_units_only")
-                             else "master" if parsed["master"] else "fund")
-    stored.holdings_issue = holdings_issue(text, parsed)
-    stored.master_isin = parse_master_isin(text)
-    stored.aimc_category_raw = raw_cat
-    stored.aimc_category = canonical_category(raw_cat)
-    stored.fx_hedge_pct = parse_fx_hedge_pct(text)
+    return {
+        "text_hash": hashlib.sha256(text.encode()).hexdigest(),
+        "holdings": parsed["rows"] if parsed else None,
+        "holdings_scope": (None if not parsed else "fund_units" if parsed.get("fund_units_only")
+                           else "master" if parsed["master"] else "fund"),
+        "holdings_issue": holdings_issue(text, parsed),
+        "master_isin": parse_master_isin(text),
+        "aimc_category_raw": raw_cat,
+        "aimc_category": canonical_category(raw_cat),
+        "fx_hedge_pct": parse_fx_hedge_pct(text),
+    }
+
+
+def _stock_rows(scope: str | None, holdings: list | None) -> int:
+    return len(holdings or []) if scope in ("master", "fund") else 0
+
+
+def _compare(old, new) -> str:
+    return "better" if new > old else "worse" if new < old else "same"
+
+
+_HOLDINGS_FIELDS = ("holdings", "holdings_scope", "holdings_issue")
+
+
+def apply_parsed(stored: FundFactsheet, text: str, same_document: bool = False) -> dict[str, str]:
+    """
+    Write parsed fields onto `stored`. When re-parsing the SAME document (same PDF and
+    as-of), a result that is worse than what is stored never overwrites it — a parser
+    change must not lose data it used to get. A newer document always wins for holdings
+    (they genuinely change month to month); a category or hedge % that comes back empty
+    keeps the stored value either way. Returns {field: better|same|worse} for re-parses.
+    """
+    new = parse_fields(text)
+    outcome: dict[str, str] = {}
+    keep: set[str] = set()
+    if same_document:
+        outcome["holdings"] = _compare(_stock_rows(stored.holdings_scope, stored.holdings),
+                                       _stock_rows(new["holdings_scope"], new["holdings"]))
+        if outcome["holdings"] == "worse":
+            keep |= set(_HOLDINGS_FIELDS)
+    for field in ("aimc_category", "fx_hedge_pct"):
+        old_has, new_has = getattr(stored, field) is not None, new[field] is not None
+        if same_document:
+            outcome[field] = _compare(old_has, new_has)
+        if old_has and not new_has and (same_document or field == "aimc_category"):
+            keep.add(field)
+            if field == "aimc_category":
+                keep.add("aimc_category_raw")
+    for field, value in new.items():
+        if field not in keep:
+            setattr(stored, field, value)
+    return outcome
 
 
 async def _latest_url(proj_id: str) -> tuple[str, date | None] | None:
@@ -218,11 +274,12 @@ async def ensure_factsheet(db: AsyncSession, proj_id: str) -> FundFactsheet | No
         logger.warning("Factsheet fetch failed for %s: %s", proj_id, exc)
         return stored
 
+    same = stored is not None and stored.pdf_url == url and stored.as_of == as_of
     if stored is None:
         stored = FundFactsheet(sec_proj_id=proj_id)
         db.add(stored)
     stored.pdf_url, stored.as_of = url, as_of
-    apply_parsed(stored, text)
+    apply_parsed(stored, text, same_document=same)
     stored.scan_status, stored.scan_error = "ok", None
     stored.fetched_at = datetime.now(timezone.utc)
     await db.flush()
@@ -265,22 +322,32 @@ async def scan_factsheets(db: AsyncSession, force: bool = False, limit: int | No
     await db.commit()
 
     counts = {"ok": 0, "no_factsheet": 0, "error": 0}
+    reparse: dict[str, dict[str, int]] = {}   # field → {better, same, worse} for re-parsed documents
     for n, proj_id in enumerate(todo, 1):
         stored = await db.get(FundFactsheet, proj_id) or FundFactsheet(sec_proj_id=proj_id)
         db.add(stored)
         try:
             latest = await _latest_url(proj_id)
             if latest is None:
-                stored.scan_status, stored.scan_error = "no_factsheet", None
+                result = "no_factsheet"
+                if stored.scan_status != "ok":   # never drop a parsed factsheet because SEC's list is empty today
+                    stored.scan_status, stored.scan_error = "no_factsheet", None
             else:
+                same = stored.scan_status == "ok" and (stored.pdf_url, stored.as_of) == latest
+                text = await _download_text(latest[0])
                 stored.pdf_url, stored.as_of = latest
-                apply_parsed(stored, await _download_text(stored.pdf_url))
+                for field, result in apply_parsed(stored, text, same_document=same).items():
+                    reparse.setdefault(field, {"better": 0, "same": 0, "worse": 0})[result] += 1
                 stored.scan_status, stored.scan_error = "ok", None
+                result = "ok"
                 await asyncio.sleep(delay)
         except _FETCH_ERRORS as exc:
-            stored.scan_status, stored.scan_error = "error", f"{type(exc).__name__}: {exc}"[:500]
+            result = "error"
+            if stored.scan_status != "ok":   # a failed re-download keeps the stored result
+                stored.scan_status = "error"
+            stored.scan_error = f"{type(exc).__name__}: {exc}"[:500]
         stored.fetched_at = datetime.now(timezone.utc)
-        counts[stored.scan_status] += 1
+        counts[result] += 1
         if n % SCAN_PROGRESS_EVERY == 0:
             (await db.get(SyncJob, job.id)).error_message = f"{n}/{len(todo)} " + \
                 " ".join(f"{k}:{v}" for k, v in counts.items())
@@ -289,7 +356,8 @@ async def scan_factsheets(db: AsyncSession, force: bool = False, limit: int | No
     job = await db.get(SyncJob, job.id)
     job.completed_at = datetime.now(timezone.utc)
     job.status = "success"
-    job.error_message = f"{len(todo)}/{len(todo)} " + " ".join(f"{k}:{v}" for k, v in counts.items())
+    job.error_message = (f"{len(todo)}/{len(todo)} " + " ".join(f"{k}:{v}" for k, v in counts.items())
+                         + "".join(f" {f}[{r['better']}+/{r['same']}=/{r['worse']}-]" for f, r in reparse.items()))
     await db.commit()
-    logger.info("Factsheet scan: %s", counts)
-    return {"scanned": len(todo), **counts}
+    logger.info("Factsheet scan: %s re-parse: %s", counts, reparse)
+    return {"scanned": len(todo), **counts, "reparse": reparse}
