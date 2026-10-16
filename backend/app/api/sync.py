@@ -16,7 +16,7 @@ from app.schemas.fund import SyncJobOut
 from app.api.deps import require_admin
 from app.services import sync_service
 from app.services import finnomena_service
-from app.services import fund_category_service, news_service, proxy_service
+from app.services import factsheet_service, fund_category_service, news_service, proxy_service
 from app.services.sec_api import SecApiUnauthorizedError
 from app.services.portfolio_service import clear_all_cache
 
@@ -63,6 +63,14 @@ async def _run_digests(week_start: date | None, force: bool):
             await news_service.build_digests(db, week_start=week_start, force=force)
         except Exception:
             logger.exception("Background news digests failed")
+
+
+async def _run_factsheet_scan(force: bool):
+    async with AsyncSessionLocal() as db:
+        try:
+            await factsheet_service.scan_factsheets(db, force=force)
+        except Exception:
+            logger.exception("Background factsheet scan failed")
 
 
 async def _run_nav_sync(nav_date: date):
@@ -194,6 +202,14 @@ async def trigger_proxy_refresh(background_tasks: BackgroundTasks, force: bool =
     """Suggest + validate price/news proxy tickers for portfolio funds (manual overrides kept)."""
     background_tasks.add_task(_run_proxies, force)
     return {"status": "started", "message": "Proxy refresh running in background"}
+
+
+@router.post("/factsheets")
+async def trigger_factsheet_scan(background_tasks: BackgroundTasks, force: bool = False, _=Depends(require_admin)):
+    """Scan SEC factsheets of all active funds (AIMC category, holdings, FX hedge %).
+    Resumable: already-scanned funds are skipped unless force=true."""
+    background_tasks.add_task(_run_factsheet_scan, force)
+    return {"status": "started", "message": "Factsheet scan running in background"}
 
 
 @router.post("/news")

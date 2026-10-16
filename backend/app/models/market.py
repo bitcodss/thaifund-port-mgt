@@ -4,9 +4,10 @@ raw news collected from Yahoo RSS, and weekly per-ticker news digests.
 """
 import uuid
 from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy import (
-    Boolean, Date, DateTime, Integer, JSON, String, Text, UniqueConstraint, Uuid, func,
+    Boolean, Date, DateTime, Integer, JSON, Numeric, String, Text, UniqueConstraint, Uuid, func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -83,10 +84,15 @@ class FundFactsheet(Base):
     __tablename__ = "fund_factsheets"
 
     sec_proj_id: Mapped[str] = mapped_column(String(50), primary_key=True)
-    pdf_url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    pdf_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     as_of: Mapped[date | None] = mapped_column(Date, nullable=True)
-    text_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    text_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     holdings: Mapped[list | None] = mapped_column(JSON, nullable=True)   # [{name, pct}]
     holdings_scope: Mapped[str | None] = mapped_column(String(12), nullable=True)
     master_isin: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    aimc_category_raw: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    aimc_category: Mapped[str | None] = mapped_column(String(150), nullable=True, index=True)  # official name
+    fx_hedge_pct: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)  # actual, when printed
+    scan_status: Mapped[str] = mapped_column(String(20), nullable=False, default="ok")  # ok|no_factsheet|error
+    scan_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

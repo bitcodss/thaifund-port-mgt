@@ -14,7 +14,7 @@ from app.api import sync as sync_router_module
 from app.api import analytics as analytics_router_module
 from app.database import AsyncSessionLocal
 from app.models.fund import Fund, NavHistory
-from app.services import fund_category_service, news_service, proxy_service, sync_service
+from app.services import factsheet_service, fund_category_service, news_service, proxy_service, sync_service
 from app.services.clock import today_ict
 from app.services.portfolio_service import clear_all_cache
 
@@ -94,6 +94,9 @@ async def _daily_metadata_sync():
             logger.info("Scheduled fund categorisation: %s", result)
             result = await proxy_service.refresh_proxies(db)
             logger.info("Scheduled proxy refresh: %s", result)
+            # New fund projects only — each scanned project is checkpointed in fund_factsheets
+            result = await factsheet_service.scan_factsheets(db)
+            logger.info("Scheduled factsheet scan (new funds): %s", result)
             clear_all_cache()
         except Exception:
             logger.exception("Scheduled metadata sync failed")

@@ -223,6 +223,8 @@ async def sync_fund_metadata(db: AsyncSession) -> dict:
             fund.amc = amc_name
             fund.amc_unique_id = amc_id
             fund.fund_status = _fund_status_code(fdata.get("fund_status"))
+            # FX-hedge policy for every fund (peer comparison needs it market-wide)
+            fund.fx_hedge = fdata.get("exchange_rate_protection_policy") or fund.fx_hedge
             fund.last_synced_at = datetime.now(timezone.utc)
 
     # ── Enrich asset_class + risk_level via /policy and /performance ──────────
