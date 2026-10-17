@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import calendar
 import logging
-import re
 import statistics
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -35,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.fund import Fund, NavHistory
 from app.models.market import FundFactsheet, FxRate, PeerProfile, PeerSnapshot
 from app.services import yahoo_client
+from app.services.currency import currency_from_text
 from app.services.peer_service import _member_key, is_approved, select_members
 from app.services.peer_taxonomy import MIN_THEME_GROUP
 
@@ -45,12 +45,6 @@ SMALL_GROUP = 8             # masters incl. the fund: below this, rank instead o
 FX_TICKERS = {"USD": "THB=X", "EUR": "EURTHB=X", "JPY": "JPYTHB=X", "HKD": "HKDTHB=X",
               "CNY": "CNYTHB=X", "GBP": "GBPTHB=X", "SGD": "SGDTHB=X"}
 MIN_FX_ROWS = 200            # fewer daily rows from a direct pair → use the USD cross rate
-_THAI_CCY = (("USD", r"ดอลล[า่]+ร์?\s*สหรัฐ|ดอลล[า่]+ร์?\s*(?:สรอ|US)"), ("HKD", r"ดอลล[า่]+ร์?\s*ฮ่องกง"),
-             ("SGD", r"ดอลล[า่]+ร์?\s*สิงคโปร์"), ("EUR", r"ยูโร"), ("JPY", r"เยน"), ("CNY", r"หยวน"),
-             ("GBP", r"ปอนด์"))
-_CCY_CODE = re.compile(r"\b(USD|EUR|JPY|HKD|CNY|CNH|GBP|SGD)\b")
-_REGION_CCY = {"Japan Equity": "JPY", "European Equity": "EUR", "China Equity - A Shares": "CNY",
-               "Greater China Equity": "HKD"}
 STALE_DAYS = 7              # a month-end NAV older than this counts as missing
 MIN_PEERS = MIN_THEME_GROUP - 1   # other masters needed for a percentile (group of 5 incl. the fund)
 MIN_Z_OBS = 12              # prior observations for an own-history z-score
@@ -85,21 +79,11 @@ def hedge_ratio(group: str | None, actual_pct: Decimal | None) -> tuple[float, b
 
 
 def fund_currency(p: PeerProfile) -> tuple[str, str]:
-    """(currency, source) — master share-class currency from SEC policy / master name, else region, else USD."""
+    """Stored currency (from the full policy text at profile build), else derived from the classifier input."""
+    if p.currency:
+        return p.currency, p.currency_source or "policy"
     data = p.classifier_input or {}
-    policy = data.get("policy") or ""
-    for m in re.finditer(r"สกุลเงิน", policy):
-        window = policy[m.end():m.end() + 40]
-        if code := _CCY_CODE.search(window):
-            return ("CNY" if code.group(1) == "CNH" else code.group(1)), "policy"
-        for ccy, rx in _THAI_CCY:
-            if re.match(r"\s*(?:" + rx + ")", window):
-                return ccy, "policy"
-    if code := _CCY_CODE.search(data.get("master_fund") or ""):
-        return ("CNY" if code.group(1) == "CNH" else code.group(1)), "master_name"
-    if p.aimc_category in _REGION_CCY:
-        return _REGION_CCY[p.aimc_category], "region"
-    return "USD", "default"
+    return currency_from_text(data.get("policy") or "", data.get("master_fund"), p.aimc_category)
 
 
 def rank(value: float, others: list[float]) -> tuple[int, int]:

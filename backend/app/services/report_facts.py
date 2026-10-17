@@ -10,8 +10,14 @@ Flags (each holding appears ONCE on the watchlist, with every reason that applie
                 Percentile < 25, or last place in groups under SMALL_GROUP masters.
                 Overlapping 3M windows can repeat one bad month, so the facts name the
                 month that drove each window and whether both share it (single_event).
-- loss_10pct    P&L ≤ −10% on the open lots' cost basis (same definition as the Holdings
-                page; a switched-in lot carries its original cost).
+- loss_10pct    P&L ≤ −10% SINCE ENTRY INTO THIS FUND: a bought lot's cost, a switched-in
+                lot's units × NAV on the switch-in date — what this fund did to the money,
+                not the previous fund's gain or loss. The tax-lot P&L (original cost carried
+                through switches, as on the Holdings page) is kept alongside as context.
+
+Tax facts: every lot's scheme, eligibility date and days remaining (rules table), plus the
+transfer / early-sale rules for RMF and SSF, so the narrative never suggests a move the
+holder can't make (e.g. selling an RMF before its conditions are met).
 """
 from __future__ import annotations
 
@@ -25,13 +31,73 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.fund import Fund
 from app.models.market import PeerSnapshot
 from app.models.portfolio import Portfolio
-from app.models.tax_lot import TaxLot
+from app.models.tax_lot import LotConsumption, TaxLot, TaxSchemeRule
+from app.models.transaction import Transaction, TransactionType
+from app.models.user import User
 from app.services import peer_metrics as pm
+from app.services import portfolio_service
 
 Z_FLAG = -2.0
 LOSS_FLAG = -0.10
 BOTTOM_PCT = 25
 NAV_HISTORY_FROM = date(2015, 1, 31)
+
+# Scheme rules beyond the holding period (holding years / age come from tax_scheme_rules).
+TAX_SCHEME_NOTES = {
+    "RMF": [
+        "Selling before the holding conditions are met breaks the tax condition: deductions claimed must be "
+        "repaid and the gain is taxable.",
+        "Switching to another RMF of the same AMC keeps the original purchase date and holding period.",
+        "Moving to another AMC is a transfer to that AMC's RMF (allowed, keeps the holding period) — slower "
+        "than a same-AMC switch, not an instant switch.",
+        "Moving the money to a non-RMF fund counts as selling the RMF.",
+    ],
+    "SSF": [
+        "Selling before the holding period is met breaks the tax condition: deductions claimed must be "
+        "repaid and the gain is taxable.",
+        "Switching to another SSF of the same AMC keeps the original purchase date and holding period.",
+        "Moving to another AMC is a transfer to that AMC's SSF (allowed, keeps the holding period) — slower "
+        "than a same-AMC switch, not an instant switch.",
+        "Moving the money to a non-SSF fund counts as selling the SSF.",
+    ],
+}
+
+
+async def lot_entry_values(db: AsyncSession, lots: list[TaxLot]) -> dict:
+    """
+    lot_id → (entry value of the remaining units, entry date, how). A bought lot enters at its
+    cost; a switched-in lot at units × NAV of the SWITCH_IN that created it — found through its
+    source lot's SWITCH_OUT consumption and the paired SWITCH_IN into this lot's fund.
+    """
+    out = {}
+    for lot in lots:
+        if lot.source_lot_id is None:
+            out[lot.id] = (lot.cost_basis_remaining, lot.original_purchase_date, "buy")
+            continue
+        outs = (await db.execute(
+            select(Transaction, LotConsumption.cost_basis_consumed)
+            .join(LotConsumption, LotConsumption.transaction_id == Transaction.id)
+            .where(LotConsumption.lot_id == lot.source_lot_id,
+                   Transaction.type == TransactionType.SWITCH_OUT.value))).all()
+        best = None
+        for out_tx, consumed in outs:
+            in_tx = (await db.execute(select(Transaction).where(
+                Transaction.portfolio_id == lot.portfolio_id, Transaction.pair_id == out_tx.pair_id,
+                Transaction.type == TransactionType.SWITCH_IN.value,
+                Transaction.fund_code == lot.fund_code))).scalars().first()
+            if in_tx is None or not in_tx.nav:
+                continue
+            # one source lot switched into the same fund twice: the consumption whose cost
+            # the new lot inherited (cost only shrinks afterwards, on sells)
+            gap = consumed - lot.cost_basis_remaining
+            if gap >= 0 and (best is None or gap < best[0]):
+                best = (gap, in_tx)
+        if best:
+            in_tx = best[1]
+            out[lot.id] = (lot.units_remaining * in_tx.nav, in_tx.date, "switch_in")
+        else:
+            out[lot.id] = (lot.cost_basis_remaining, lot.original_purchase_date, "cost_basis_fallback")
+    return out
 
 
 def _f(v) -> float | None:
@@ -88,10 +154,30 @@ async def portfolio_facts(db: AsyncSession, portfolio_id, month: date) -> dict:
     portfolio = await db.get(Portfolio, portfolio_id)
     lots = (await db.execute(select(TaxLot).where(TaxLot.portfolio_id == portfolio_id,
                                                   TaxLot.units_remaining > 0))).scalars().all()
-    held: dict[str, dict] = defaultdict(lambda: {"units": Decimal(0), "cost": Decimal(0)})
+    entries = await lot_entry_values(db, lots)
+    held: dict[str, dict] = defaultdict(lambda: {"units": Decimal(0), "cost": Decimal(0), "entry": Decimal(0),
+                                                 "entry_dates": set(), "entry_how": set()})
     for lot in lots:
-        held[lot.fund_code]["units"] += lot.units_remaining
-        held[lot.fund_code]["cost"] += lot.cost_basis_remaining
+        h = held[lot.fund_code]
+        h["units"] += lot.units_remaining
+        h["cost"] += lot.cost_basis_remaining
+        value, when, how = entries[lot.id]
+        h["entry"] += value
+        h["entry_dates"].add(when)
+        h["entry_how"].add(how)
+
+    owner = await db.get(User, portfolio.user_id) if portfolio else None
+    eligibility = await portfolio_service.get_tax_eligibility(
+        portfolio_id, db, month, owner.date_of_birth if owner else None)
+    tax_by_code: dict[str, list] = defaultdict(list)
+    for e in eligibility:
+        if e.tax_scheme != "NORMAL":
+            tax_by_code[e.fund_code].append({
+                "scheme": e.tax_scheme, "units": float(e.units_remaining),
+                "original_purchase_date": str(e.original_purchase_date), "switch_chain": e.switch_chain,
+                "eligible": e.is_eligible, "eligible_date": str(e.eligible_date) if e.eligible_date else None,
+                "days_remaining": e.days_remaining, "age_requirement": e.age_requirement})
+    rules = {r.scheme: r for r in (await db.execute(select(TaxSchemeRule))).scalars()}
     funds = {f.fund_code: f for f in (await db.execute(select(Fund).where(Fund.fund_code.in_(held)))).scalars()}
 
     nav_months, m = [], NAV_HISTORY_FROM
@@ -115,7 +201,8 @@ async def portfolio_facts(db: AsyncSession, portfolio_id, month: date) -> dict:
         for k, n in (("1m", 1), ("3m", 3)):
             hist = [r for x in earlier if (r := series.ret(x, n)) is not None]
             z[k] = pm.zscore(own[f"return_{k}"], hist) if own[f"return_{k}"] is not None else None
-        pnl = float(value / h["cost"] - 1) if value is not None and h["cost"] > 0 else None
+        pnl = float(value / h["entry"] - 1) if value is not None and h["entry"] > 0 else None
+        pnl_lot = float(value / h["cost"] - 1) if value is not None and h["cost"] > 0 else None
 
         pid = fund.sec_proj_id if fund else None
         snap, prev = snaps.get((pid, month)), snaps.get((pid, pm.months_back(month, 1)))
@@ -140,7 +227,11 @@ async def portfolio_facts(db: AsyncSession, portfolio_id, month: date) -> dict:
         rows.append({
             "fund_code": code, "sec_proj_id": pid, "name_en": fund.name_en if fund else None,
             "name_th": fund.name_th if fund else None, "units": float(h["units"]), "cost": float(h["cost"]),
-            "nav": nav, "value": float(value) if value is not None else None, "pnl_pct": pnl,
+            "nav": nav, "value": float(value) if value is not None else None,
+            "pnl_pct": pnl, "entry_value": float(h["entry"]),
+            "entry_dates": sorted(str(d) for d in h["entry_dates"]), "entry_basis": sorted(h["entry_how"]),
+            "pnl_lot_cost_pct": pnl_lot,     # incl. the previous fund's result (tax-lot cost)
+            "tax_lots": tax_by_code.get(code, []),
             "missing_month_end_nav": nav is None, **own, "z_1m": z["1m"], "z_3m": z["3m"],
             "peers": peer_facts(snap), "flags": flags,
         })
@@ -152,6 +243,10 @@ async def portfolio_facts(db: AsyncSession, portfolio_id, month: date) -> dict:
         "portfolio": {"id": str(portfolio_id), "name": portfolio.name if portfolio else None,
                       "value": float(total_value), "cost": float(sum(h["cost"] for h in held.values()))},
         "funds": rows,
+        "tax_rules": {s: {"holding_years": float(rules[s].holding_years) if s in rules else None,
+                          "age_requirement": rules[s].age_requirement if s in rules else None,
+                          "notes": TAX_SCHEME_NOTES.get(s, [])}
+                      for s in sorted({t["scheme"] for r in rows for t in r["tax_lots"]})},
         # one entry per holding, every reason listed together
         "watchlist": [{"fund_code": r["fund_code"], "reasons": [f["rule"] for f in r["flags"]], "flags": r["flags"]}
                       for r in sorted(rows, key=lambda r: (-len(r["flags"]), -(r["weight"] or 0))) if r["flags"]],

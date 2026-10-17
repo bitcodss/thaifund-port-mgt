@@ -79,3 +79,39 @@ async def test_watchlist_one_entry_with_all_reasons_and_single_event(db):
     assert bottom["uses_backfilled_snapshot"] is True
     fund = facts["funds"][0]
     assert fund["pnl_pct"] < -0.10 and fund["weight"] == 1.0 and fund["peers"]["display"] == "percentile"
+
+
+@pytest.mark.asyncio
+async def test_loss_flag_measures_from_switch_in_not_tax_lot_cost(db):
+    """Old fund +20%, switch, new fund −25%: lot cost shows −10%, this fund cost us −25%."""
+    from app.models.tax_lot import LotConsumption
+    from app.models.transaction import Transaction
+    user = User(id=uuid.uuid4(), email="s@x", password_hash="x", role="user")
+    port = Portfolio(id=uuid.uuid4(), user_id=user.id, name="RMF")
+    db.add_all([user, port, Fund(fund_code="OLD", fund_status="RG"), Fund(fund_code="NEW", fund_status="RG")])
+    src = TaxLot(id=uuid.uuid4(), portfolio_id=port.id, fund_code="OLD", original_purchase_date=date(2023, 1, 5),
+                 units_remaining=Decimal("0"), cost_basis_remaining=Decimal("0"), tax_scheme="RMF")
+    new = TaxLot(id=uuid.uuid4(), portfolio_id=port.id, fund_code="NEW", original_purchase_date=date(2023, 1, 5),
+                 units_remaining=Decimal("120"), cost_basis_remaining=Decimal("1000"), tax_scheme="RMF",
+                 source_lot_id=src.id)
+    out_tx = Transaction(id=uuid.uuid4(), portfolio_id=port.id, date=date(2026, 3, 2), type="SWITCH_OUT",
+                         fund_code="OLD", units=Decimal("100"), nav=Decimal("12"), amount=Decimal("1200"),
+                         pair_id="sw1", tax_scheme="RMF")
+    in_tx = Transaction(id=uuid.uuid4(), portfolio_id=port.id, date=date(2026, 3, 2), type="SWITCH_IN",
+                        fund_code="NEW", units=Decimal("120"), nav=Decimal("10"), amount=Decimal("1200"),
+                        pair_id="sw1", tax_scheme="RMF")
+    db.add_all([src, new, out_tx, in_tx,
+                LotConsumption(transaction_id=out_tx.id, lot_id=src.id, units_consumed=Decimal("100"),
+                               cost_basis_consumed=Decimal("1000"))])
+    db.add(NavHistory(fund_code="NEW", trade_date=SEP, nav=Decimal("7.5")))      # −25% since switch-in
+    await db.commit()
+
+    facts = await rf.portfolio_facts(db, port.id, SEP)
+    fund = facts["funds"][0]
+    assert fund["pnl_pct"] == pytest.approx(-0.25) and fund["entry_basis"] == ["switch_in"]
+    assert fund["pnl_lot_cost_pct"] == pytest.approx(-0.10)
+    assert fund["entry_dates"] == ["2026-03-02"]
+    assert facts["watchlist"][0]["reasons"] == ["loss_10pct"]
+    lot = fund["tax_lots"][0]
+    assert lot["scheme"] == "RMF" and lot["original_purchase_date"] == "2023-01-05" and lot["eligible"] is False
+    assert "RMF" in facts["tax_rules"] and any("transfer" in n for n in facts["tax_rules"]["RMF"]["notes"])

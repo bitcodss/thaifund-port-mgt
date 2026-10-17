@@ -134,6 +134,9 @@ class PeerProfile(Base):
     representative_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     hedge_group: Mapped[str | None] = mapped_column(String(12), nullable=True)      # unhedged|full|dynamic|partial|domestic|unknown
     hedge_source: Mapped[str | None] = mapped_column(String(12), nullable=True)     # sec|factsheet
+    # FX exposure currency: master share class / listing market from the FULL SEC policy text
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    currency_source: Mapped[str | None] = mapped_column(String(12), nullable=True)  # policy|master_name|listing|region|default
     input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

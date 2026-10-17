@@ -28,6 +28,7 @@ from collections import Counter
 
 from app.services.aimc import AIMC_CATEGORIES, AIMC_DEFINITIONS
 from app.services.llm import LlmError, generate_json
+from app.services.currency import currency_from_text
 from app.services.peer_taxonomy import broad_index_theme, MIN_THEME_GROUP, themes_for
 from app.services.sec_api import SecApiError
 
@@ -220,6 +221,10 @@ async def build_peer_profiles(db: AsyncSession, proj_ids: set[str] | None = None
         mk = master_key(fs_row.master_isin, base.get("feederfund_master_fund"))
         prof.master_key_kind, prof.master_key = mk if mk else (None, None)
         prof.classifier_input = data
+        # currency from the FULL policy text (classifier input is cut at 1,200 chars; currency is often later)
+        full_policy = re.sub(r"\s+", " ", re.sub(r"<[^>]+>|&nbsp;", " ", base.get("investment_policy_desc") or ""))
+        prof.currency, prof.currency_source = currency_from_text(full_policy, base.get("feederfund_master_fund"),
+                                                                 prof.aimc_category or fs_row.aimc_category)
 
         if prof.input_hash == h and not force:
             counts["unchanged"] += 1

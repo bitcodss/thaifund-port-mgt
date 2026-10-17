@@ -207,3 +207,18 @@ async def test_thin_fx_pair_uses_usd_cross_rate(db):
     assert out == {"USD": 300, "CNY": 300}
     rate = (await db.execute(select(FxRate.rate).where(FxRate.pair == "CNYTHB"))).scalars().first()
     assert float(rate) == pytest.approx(5.0)                             # 32 / 6.4
+
+
+@pytest.mark.parametrize("policy,master,cat,expected", [
+    # real SEC policy fragments of held funds (found beyond the 1,200-char classifier cut)
+    ("Share Class I1USD ISIN LU1985812756 สกุลเงิน ดอลลาร์สหรัฐ (U.S. dollars)", None, "Global Equity", ("USD", "policy")),
+    ("ลงทุนในรูปของเงินสกุลดอลลาร์สหรัฐฯ ส่วนที่เหลือ", None, "Emerging Market", ("USD", "policy")),
+    ("MSCI World Value TR Net EUR Index ticker MXWO000V Index สกุลเงิน ยูโร (EUR)", None, "Other", ("EUR", "policy")),
+    ("ในชนิดหน่วยลงทุน (share class) “Class C (USD)” โดยเฉลี่ย", None, "Global Equity - Alternative Energy", ("USD", "policy")),
+    ("โดยจะลงทุนในสกุลเงินดอลล่าร์ฮ่องกง (HKD)", None, "Asia Pacific Ex Japan", ("HKD", "policy")),
+    ("ลงทุนในตราสารทุนที่จดทะเบียนซื้อขายในตลาดหลักทรัพย์ของประเทศสหรัฐอเมริกา", None, "US Equity", ("USD", "listing")),
+    ("เปลี่ยนแปลงสกุลเงินลงทุนเป็นสกุลเงินอื่นใดนอกเหนือจากสกุลเงินบาท", None, "Greater China Equity", ("HKD", "region")),
+])
+def test_currency_from_full_policy_text(policy, master, cat, expected):
+    from app.services.currency import currency_from_text
+    assert currency_from_text(policy, master, cat) == expected
