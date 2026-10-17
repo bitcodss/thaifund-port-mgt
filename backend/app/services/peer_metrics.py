@@ -8,9 +8,14 @@ z-scores vs the fund's own history, the FX effect, and the other feeders of the 
 Hedge handling: each peer master is valued at the median of its feeders in the SAME hedge
 group as the fund. When fewer than MIN_THEME_GROUP masters (incl. the fund's own) have such
 a feeder, every master in the group is used and feeders of another hedge group are adjusted
-to the fund's hedge ratio: r + (h_peer − h_fund) × USD/THB return ("fx_adjusted"). Hedge
-ratios are the factsheet's actual "FX Hedging xx%" when printed, otherwise an estimate by
-hedge group (flagged). USD/THB stands in for every foreign currency — an approximation.
+to the fund's hedge ratio: r + (h_peer − h_fund) × FX return of the PEER's currency
+("fx_adjusted"). Hedge ratios are the factsheet's actual "FX Hedging xx%" when printed,
+otherwise an estimate by hedge group (flagged). Currency per fund: the master fund's share-class
+currency stated in the SEC investment policy / master name, else the category's region
+(Japan → JPY, Europe → EUR, …), else USD.
+
+Groups smaller than SMALL_GROUP masters (incl. the fund) are shown as a rank ("4 of 5")
+instead of a percentile; there the bottom flag means last place only.
 
 Backfilled snapshots are computed from stored NAV with TODAY's peer lists and are marked so.
 """
@@ -18,6 +23,7 @@ from __future__ import annotations
 
 import calendar
 import logging
+import re
 import statistics
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -35,7 +41,15 @@ from app.services.peer_taxonomy import MIN_THEME_GROUP
 logger = logging.getLogger(__name__)
 
 HORIZONS = {"1m": 1, "3m": 3, "6m": 6, "1y": 12}
-FX_PAIR, FX_TICKER = "USDTHB", "THB=X"
+SMALL_GROUP = 8             # masters incl. the fund: below this, rank instead of percentile
+FX_TICKERS = {"USD": "THB=X", "EUR": "EURTHB=X", "JPY": "JPYTHB=X", "HKD": "HKDTHB=X",
+              "CNY": "CNYTHB=X", "GBP": "GBPTHB=X", "SGD": "SGDTHB=X"}
+_THAI_CCY = (("USD", r"ดอลล[า่]+ร์?\s*สหรัฐ|ดอลล[า่]+ร์?\s*(?:สรอ|US)"), ("HKD", r"ดอลล[า่]+ร์?\s*ฮ่องกง"),
+             ("SGD", r"ดอลล[า่]+ร์?\s*สิงคโปร์"), ("EUR", r"ยูโร"), ("JPY", r"เยน"), ("CNY", r"หยวน"),
+             ("GBP", r"ปอนด์"))
+_CCY_CODE = re.compile(r"\b(USD|EUR|JPY|HKD|CNY|CNH|GBP|SGD)\b")
+_REGION_CCY = {"Japan Equity": "JPY", "European Equity": "EUR", "China Equity - A Shares": "CNY",
+               "Greater China Equity": "HKD"}
 STALE_DAYS = 7              # a month-end NAV older than this counts as missing
 MIN_PEERS = MIN_THEME_GROUP - 1   # other masters needed for a percentile (group of 5 incl. the fund)
 MIN_Z_OBS = 12              # prior observations for an own-history z-score
@@ -67,6 +81,29 @@ def hedge_ratio(group: str | None, actual_pct: Decimal | None) -> tuple[float, b
     if actual_pct is not None:
         return min(max(float(actual_pct) / 100, 0.0), 1.0), False
     return ESTIMATED_HEDGE.get(group or "unknown", 0.5), True
+
+
+def fund_currency(p: PeerProfile) -> tuple[str, str]:
+    """(currency, source) — master share-class currency from SEC policy / master name, else region, else USD."""
+    data = p.classifier_input or {}
+    policy = data.get("policy") or ""
+    for m in re.finditer(r"สกุลเงิน", policy):
+        window = policy[m.end():m.end() + 40]
+        if code := _CCY_CODE.search(window):
+            return ("CNY" if code.group(1) == "CNH" else code.group(1)), "policy"
+        for ccy, rx in _THAI_CCY:
+            if re.match(r"\s*(?:" + rx + ")", window):
+                return ccy, "policy"
+    if code := _CCY_CODE.search(data.get("master_fund") or ""):
+        return ("CNY" if code.group(1) == "CNH" else code.group(1)), "master_name"
+    if p.aimc_category in _REGION_CCY:
+        return _REGION_CCY[p.aimc_category], "region"
+    return "USD", "default"
+
+
+def rank(value: float, others: list[float]) -> tuple[int, int]:
+    """(rank, group size) — 1 = best; the fund counts in the group."""
+    return 1 + sum(1 for o in others if o > value), len(others) + 1
 
 
 def percentile(value: float, others: list[float]) -> float:
@@ -102,13 +139,20 @@ class MonthEnds:
 
 # ── data loading ──────────────────────────────────────────────────────────────
 
-async def sync_fx(db: AsyncSession) -> int:
-    """USD/THB daily closes from Yahoo (2 years) → fx_rates. Returns rows written."""
-    rows = await yahoo_client.history(FX_TICKER, "2y")
-    for d, v in rows:
-        await db.merge(FxRate(pair=FX_PAIR, trade_date=d, rate=Decimal(str(round(v, 8)))))
-    await db.commit()
-    return len(rows)
+async def sync_fx(db: AsyncSession) -> dict[str, int]:
+    """Daily closes vs THB for every currency in FX_TICKERS (Yahoo, 2 years) → fx_rates."""
+    out = {}
+    for ccy, ticker in FX_TICKERS.items():
+        try:
+            rows = await yahoo_client.history(ticker, "2y")
+        except yahoo_client.YahooError as e:
+            logger.warning("FX %s sync failed: %s", ccy, e)
+            continue
+        for d, v in rows:
+            await db.merge(FxRate(pair=f"{ccy}THB", trade_date=d, rate=Decimal(str(round(v, 8)))))
+        await db.commit()
+        out[ccy] = len(rows)
+    return out
 
 
 def _windows(col, months: list[date]):
@@ -157,7 +201,7 @@ async def nav_codes(db: AsyncSession, profiles: list[PeerProfile]) -> dict[str, 
 
 def compute_snapshot(me: PeerProfile, sel: dict, month: date, navs: dict[str, MonthEnds],
                      codes: dict[str, tuple[str, bool]], hedge: dict[str, tuple[float, bool]],
-                     fx: MonthEnds | None, same_master: list[PeerProfile]) -> dict | None:
+                     fx: dict[str, MonthEnds], same_master: list[PeerProfile]) -> dict | None:
     """One project's peer snapshot for `month` (pure). None when the fund has no 1M return."""
     code = codes.get(me.sec_proj_id, (None, False))[0]
     mine = navs.get(code) if code else None
@@ -169,6 +213,12 @@ def compute_snapshot(me: PeerProfile, sel: dict, month: date, navs: dict[str, Mo
         return navs[c].ret(month, k) if c in navs else None
 
     h_me, est_me = hedge[me.sec_proj_id]
+    ccy_me, ccy_src = fund_currency(me)
+
+    def fx_ret(p_ccy: str, k: int) -> float | None:
+        series = fx.get(p_ccy) or fx.get("USD")      # missing series → USD stand-in
+        return series.ret(month, k) if series else None
+
     own_key = _member_key(me)
     masters: dict[str, list[PeerProfile]] = defaultdict(list)
     for p in sel["members"]:
@@ -179,24 +229,29 @@ def compute_snapshot(me: PeerProfile, sel: dict, month: date, navs: dict[str, Mo
 
     out = {"hedge_basis": mode, "peer_masters": len(population), "hedge_ratio": h_me, "hedge_ratio_estimated": est_me}
     adjusted_masters: set[str] = set()
+    ranks: dict[str, list[int]] = {}
     for name, k in HORIZONS.items():
         r_me = mine.ret(month, k)
-        fx_ret = fx.ret(month, k) if fx else None
         values = []
         for key, feeders in population.items():
             same = [r for f in feeders if f.hedge_group == me.hedge_group and (r := ret(f, k)) is not None]
             if same:
                 values.append(statistics.median(same))
                 continue
-            if mode != "fx_adjusted" or fx_ret is None:
+            if mode != "fx_adjusted":
                 continue
-            adj = [r + (hedge[f.sec_proj_id][0] - h_me) * fx_ret for f in feeders if (r := ret(f, k)) is not None]
+            # as if the peer had MY hedge ratio, on the peer's own currency exposure
+            adj = [r + (hedge[f.sec_proj_id][0] - h_me) * fxr for f in feeders
+                   if (r := ret(f, k)) is not None and (fxr := fx_ret(fund_currency(f)[0], k)) is not None]
             if adj:
                 values.append(statistics.median(adj))
                 adjusted_masters.add(key)
         out[f"ret_{name}"] = r_me
         out[f"median_{name}"] = statistics.median(values) if values else None
-        out[f"pct_{name}"] = percentile(r_me, values) if r_me is not None and len(values) >= MIN_PEERS else None
+        ok = r_me is not None and len(values) >= MIN_PEERS
+        out[f"pct_{name}"] = percentile(r_me, values) if ok else None
+        if ok:
+            ranks[name] = list(rank(r_me, values))
     out["fx_adjusted_masters"] = len(adjusted_masters)
 
     # own-history z-scores: this month vs every earlier month (1M) / earlier rolling 3M windows
@@ -205,8 +260,8 @@ def compute_snapshot(me: PeerProfile, sel: dict, month: date, navs: dict[str, Mo
         hist = [r for m in earlier if (r := mine.ret(m, k)) is not None]
         out[f"z_{name}"] = zscore(out[f"ret_{name}"], hist) if out[f"ret_{name}"] is not None else None
     for name, k in (("1m", 1), ("3m", 3)):
-        fx_ret = fx.ret(month, k) if fx else None
-        out[f"fx_effect_{name}"] = (1 - h_me) * fx_ret if fx_ret is not None else None
+        r_fx = fx_ret(ccy_me, k)
+        out[f"fx_effect_{name}"] = (1 - h_me) * r_fx if r_fx is not None else None
 
     feeders = []
     for f in same_master:
@@ -218,8 +273,13 @@ def compute_snapshot(me: PeerProfile, sel: dict, month: date, navs: dict[str, Mo
         vals = [f[f"ret_{n}"] for f in same_hedge if f[f"ret_{n}"] is not None]
         if vals and out[f"ret_{n}"] is not None:
             gaps[f"vs_same_master_{n}"] = out[f"ret_{n}"] - statistics.median(vals)
-    out["details"] = {"same_master": feeders, **gaps,
+    # monthly returns inside the 3M window — which month drove it (chunk 5 facts)
+    months_3m = {str(months_back(month, i)): mine.ret(months_back(month, i), 1) for i in range(3)}
+    out["details"] = {"same_master": feeders, **gaps, "ranks": ranks, "small_group": None,
+                      "months_in_3m": months_3m, "currency": ccy_me, "currency_source": ccy_src,
                       "nav_code_fallback": codes.get(me.sec_proj_id, (None, False))[1]}
+    sizes = [n for _, n in ranks.values()]
+    out["details"]["small_group"] = bool(sizes) and max(sizes) < SMALL_GROUP
     return out
 
 
@@ -251,8 +311,10 @@ async def build_snapshots(db: AsyncSession, months: list[date], backfilled: bool
         nav_months.append(m)
         m = months_back(m, -1)
     navs = await _load_month_ends(db, {c for c, _ in codes.values()}, nav_months)
-    fx_rows = (await db.execute(select(FxRate.trade_date, FxRate.rate).where(FxRate.pair == FX_PAIR))).all()
-    fx = MonthEnds([(d, float(r)) for d, r in fx_rows]) if fx_rows else None
+    fx_by: dict[str, list] = defaultdict(list)
+    for pair, d, r in (await db.execute(select(FxRate.pair, FxRate.trade_date, FxRate.rate))).all():
+        fx_by[pair[:3]].append((d, float(r)))
+    fx = {ccy: MonthEnds(rows) for ccy, rows in fx_by.items()}
     pct = dict((await db.execute(select(FundFactsheet.sec_proj_id, FundFactsheet.fx_hedge_pct))).all())
     hedge = {p.sec_proj_id: hedge_ratio(p.hedge_group, pct.get(p.sec_proj_id)) for p in profiles}
 
@@ -296,10 +358,7 @@ async def build_snapshots(db: AsyncSession, months: list[date], backfilled: bool
 
 async def run_monthly_snapshot(db: AsyncSession, today: date) -> dict:
     """Live snapshot of the last complete month (re-run daily early in the month for late NAVs)."""
-    try:
-        await sync_fx(db)
-    except yahoo_client.YahooError as e:
-        logger.warning("USD/THB sync failed, FX effect from stored rates: %s", e)
+    await sync_fx(db)                                  # per-currency failures logged, stored rates used
     return await build_snapshots(db, [last_complete_month(today)], backfilled=False)
 
 

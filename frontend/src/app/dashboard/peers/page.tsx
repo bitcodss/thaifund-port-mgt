@@ -179,8 +179,9 @@ const pctFmt = (v: number | null) => (v == null ? "–" : `${v >= 0 ? "+" : ""}$
 function SnapshotRow({ s }: { s: PeerSnapshot }) {
   const month = new Date(s.month).toLocaleDateString("en-GB", { month: "short", year: "numeric" });
   const cells = (["1m", "3m", "6m", "1y"] as const).map((h) => ({
-    h, ret: s[`ret_${h}`], med: s[`median_${h}`], pct: s[`pct_${h}`],
+    h, ret: s[`ret_${h}`], med: s[`median_${h}`], pct: s[`pct_${h}`], rank: s.details?.ranks?.[h],
   }));
+  const small = !!s.details?.small_group;
   return (
     <div className="space-y-1">
       <div className="grid grid-cols-4 gap-2 text-xs">
@@ -189,9 +190,15 @@ function SnapshotRow({ s }: { s: PeerSnapshot }) {
             <div className="text-muted-foreground uppercase">{c.h}</div>
             <div className="font-medium tabular-nums">{pctFmt(c.ret)}</div>
             <div className="text-muted-foreground tabular-nums">peers {pctFmt(c.med)}</div>
-            <div className={`tabular-nums ${c.pct != null && c.pct < 25 ? "text-red-600 dark:text-red-400" : ""}`}>
-              {c.pct == null ? "no rank" : `pct ${Math.round(c.pct)}`}
-            </div>
+            {small ? (
+              <div className={`tabular-nums ${c.rank && c.rank[0] === c.rank[1] ? "text-red-600 dark:text-red-400" : ""}`}>
+                {c.rank ? `rank ${c.rank[0]} of ${c.rank[1]}` : "no rank"}
+              </div>
+            ) : (
+              <div className={`tabular-nums ${c.pct != null && c.pct < 25 ? "text-red-600 dark:text-red-400" : ""}`}>
+                {c.pct == null ? "no rank" : `pct ${Math.round(c.pct)}`}
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -202,6 +209,7 @@ function SnapshotRow({ s }: { s: PeerSnapshot }) {
           : "same hedge group"}
         {s.hedge_ratio != null && ` · hedge ${Math.round(s.hedge_ratio * 100)}%${s.hedge_ratio_estimated ? " (estimate)" : ""}`}
         {s.fx_effect_1m != null && ` · FX effect 1M ${pctFmt(s.fx_effect_1m)}`}
+        {s.details?.currency && ` (${s.details.currency}${s.details.currency_source === "policy" || s.details.currency_source === "master_name" ? "" : ", assumed"})`}
         {!s.flag_eligible && " · rank is context only (whole-category comparison)"}
       </p>
     </div>

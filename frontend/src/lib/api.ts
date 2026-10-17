@@ -387,6 +387,12 @@ export interface PeerSnapshot {
   hedge_ratio: number | null;
   hedge_ratio_estimated: boolean | null;
   backfilled: boolean;
+  details?: {
+    ranks?: Record<string, [number, number]>;   // [rank (1 = best), group size]
+    small_group?: boolean;                      // < 8 masters: show rank, not percentile
+    currency?: string;
+    currency_source?: string;
+  } | null;
 }
 
 export interface FundProxy {

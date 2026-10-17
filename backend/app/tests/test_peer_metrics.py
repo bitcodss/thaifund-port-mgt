@@ -104,7 +104,7 @@ class TestSnapshots:
         await _fund(db, "ME", "AI", "M0", sep=11.0)
         for i in range(1, 5):
             await _fund(db, f"P{i}", "AI", f"M{i}", hedge="full", sep=10.5)
-        for d, v in ((JUL, 33.0), (AUG, 33.0), (SEP, 34.65)):          # USD/THB +5% in Sep
+        for d, v in ((JUL, 33.0), (AUG, 33.0), (SEP, 34.65)):          # USD/THB +5% in Sep (default ccy)
             db.add(FxRate(pair="USDTHB", trade_date=d, rate=Decimal(str(v))))
         await db.commit()
         await pm.build_snapshots(db, [SEP], backfilled=False)
@@ -158,3 +158,39 @@ class TestSnapshots:
         me = pm.MonthEnds(navs)
         hist = [r for mm in months[:-1] if (r := me.ret(mm, 1)) is not None]
         assert pm.zscore(me.ret(SEP, 1), hist) < -2
+
+
+class TestCurrencyAndSmallGroups:
+
+    @pytest.mark.parametrize("policy,master,cat,expected", [
+        ("ชนิดหน่วยลงทุน I Shares (Acc.) สกุลเงินเยน (JPY) กองทุนหลัก", None, "Japan Equity", ("JPY", "policy")),
+        ("ลงทุนใน share class สกุลเงินดอลลาร์สหรัฐ", None, "Japan Equity", ("USD", "policy")),
+        ("ชนิดหน่วยลงทุนสกุลเงินยูโร", None, "Global Equity", ("EUR", "policy")),
+        ("", "JPMorgan Pacific Technology - Class C (acc) - USD", "Technology Equity", ("USD", "master_name")),
+        ("", "Eleva European Selection Fund", "European Equity", ("EUR", "region")),
+        ("", "Some Fund", "Japan Equity", ("JPY", "region")),
+        ("", None, "Technology Equity", ("USD", "default")),
+    ])
+    def test_fund_currency(self, policy, master, cat, expected):
+        p = PeerProfile(sec_proj_id="X", aimc_category=cat, classifier_input={"policy": policy, "master_fund": master})
+        assert pm.fund_currency(p) == expected
+
+    def test_rank(self):
+        assert pm.rank(0.05, [0.1, 0.0, 0.2, -0.1]) == (3, 5)
+
+    @pytest.mark.asyncio
+    async def test_small_group_records_rank_and_peer_currency_used_for_fx_adjustment(self, db):
+        await _fund(db, "ME", "Growth", "M0", cat="Japan Equity", sep=10.0)
+        for i in range(1, 5):
+            await _fund(db, f"P{i}", "Growth", f"M{i}", cat="Japan Equity", hedge="full", sep=10.0)
+        for pair, sep in (("USDTHB", 34.65), ("JPYTHB", 0.209)):        # USD +5%, JPY −5%
+            for d, v in ((JUL, 33.0 if pair == "USDTHB" else 0.22), (AUG, 33.0 if pair == "USDTHB" else 0.22), (SEP, sep)):
+                db.add(FxRate(pair=pair, trade_date=d, rate=Decimal(str(v))))
+        await db.commit()
+        await pm.build_snapshots(db, [SEP], backfilled=False)
+        s = (await db.execute(select(PeerSnapshot).where(PeerSnapshot.sec_proj_id == "ME"))).scalar_one()
+        # hedged peers flat → as if unhedged in YEN terms: 0 + (1 − 0) × (−5%) = −5%; I'm flat → best of 5
+        assert float(s.median_1m) == pytest.approx(-0.05)
+        assert s.details["ranks"]["1m"] == [1, 5] and s.details["small_group"] is True
+        assert s.details["currency"] == "JPY" and float(s.fx_effect_1m) == pytest.approx(-0.05)
+        assert set(s.details["months_in_3m"]) == {"2026-09-30", "2026-08-31", "2026-07-31"}
