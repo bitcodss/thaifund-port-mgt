@@ -200,3 +200,21 @@ class PeerSnapshot(Base):
     details: Mapped[dict | None] = mapped_column(JSON, nullable=True)   # same-master feeders, peer list
     backfilled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MonthlyReport(Base):
+    """One user's monthly fund report: the facts it was written from, the narrative pieces and the HTML."""
+    __tablename__ = "monthly_reports"
+    __table_args__ = (UniqueConstraint("user_id", "month", name="uq_monthly_report_user_month"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    month: Mapped[date] = mapped_column(Date, nullable=False)                 # month-end
+    status: Mapped[str] = mapped_column(String(12), nullable=False)          # ok|partial|failed
+    facts: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    content: Mapped[dict | None] = mapped_column(JSON, nullable=True)        # narrative per section
+    html: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    errors: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

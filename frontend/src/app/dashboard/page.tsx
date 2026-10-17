@@ -13,6 +13,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import {
   PlusCircle, LogOut, FolderOpen, Pencil, Trash2, Check, X,
   RefreshCw, TrendingUp, TrendingDown, AlertTriangle, Settings, Users,
+  FileText,
 } from "lucide-react";
 import { loadSettings, derivePnlBasis, pnlFieldKey } from "@/lib/settings";
 
@@ -304,6 +305,10 @@ export default function DashboardPage() {
           <Button variant="ghost" size="sm" onClick={() => router.push("/dashboard/peers")} title="Peer groups">
             <Users className="h-4 w-4 sm:mr-1" />
             <span className="hidden sm:inline">Peers</span>
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => router.push("/dashboard/reports")} title="Monthly reports">
+            <FileText className="h-4 w-4 sm:mr-1" />
+            <span className="hidden sm:inline">Reports</span>
           </Button>
           <Button variant="ghost" size="sm" onClick={() => router.push("/dashboard/settings")} title="Settings">
             <Settings className="h-4 w-4 sm:mr-1" />

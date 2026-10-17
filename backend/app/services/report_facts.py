@@ -51,25 +51,36 @@ TAX_SCHEME_NOTES = {
         {"text": "Breaking the conditions (selling before holding 5 years from the first purchase AND age 55, or "
                  "the purchase rule below): the tax for the years whose RMF purchases were deducted, within 5 years "
                  "of each year's filing, must be paid back with the section 27 surcharge (waived if filed by March "
-                 "of the following year), and the gain on sale is taxable.", "source": _RD_2158},
+                 "of the following year), and the gain on sale is taxable.", "source": _RD_2158,
+         "th": "ขายก่อนครบเงื่อนไข (ถือครบ 5 ปีนับจากซื้อครั้งแรก และอายุ 55 ปี) หรือผิดเงื่อนไขการซื้อ: ต้องคืนภาษีของปีที่นำ RMF ไปลดหย่อน "
+               "ภายใน 5 ปีนับจากวันยื่นแบบของปีนั้น พร้อมเงินเพิ่มตามมาตรา 27 (ได้รับยกเว้นเงินเพิ่มถ้ายื่นภายในมีนาคมของปีถัดไป) และกำไรจากการขายต้องเสียภาษี"},
         {"text": "Purchase rule: buy RMF at least once a year and never pause buying for more than 1 consecutive "
-                 "year. Stopping RMF purchases altogether breaks the conditions.", "source": _RD_2158},
+                 "year. Stopping RMF purchases altogether breaks the conditions.", "source": _RD_2158,
+         "th": "ต้องซื้อ RMF อย่างน้อยปีละ 1 ครั้ง และห้ามเว้นการซื้อเกินกว่า 1 ปีติดต่อกัน"},
         {"text": "Switching to another RMF of the same AMC keeps the original purchase date and holding period.",
-         "source": "app lot engine / plan"},
+         "source": "app lot engine / plan",
+         "th": "สับเปลี่ยนไป RMF กองอื่นใน บลจ. เดียวกัน วันซื้อเดิมยังนับต่อ"},
         {"text": "Moving to another AMC is a transfer to that AMC's RMF (allowed, keeps the holding period); "
-                 "slower than a same-AMC switch.", "source": "plan (cross-AMC transfer rule)"},
-        {"text": "Moving the money to a non-RMF fund counts as selling the RMF.", "source": _RD_2158},
+                 "slower than a same-AMC switch.", "source": "plan (cross-AMC transfer rule) — not an official source",
+         "th": "ย้ายไป บลจ. อื่นทำได้โดยการโอนไป RMF ของ บลจ. นั้น ระยะถือยังนับต่อ แต่ใช้เวลานานกว่าการสับเปลี่ยน"},
+        {"text": "Moving the money to a non-RMF fund counts as selling the RMF.", "source": _RD_2158,
+         "th": "ย้ายเงินไปกองที่ไม่ใช่ RMF นับเป็นการขาย RMF"},
     ],
     "SSF": [
         {"text": "Breaking the condition (selling before holding 10 years from purchase, except disability or "
                  "death): the tax for the years whose SSF purchases were deducted, within 5 years of each year's "
                  "filing, must be paid back with the section 27 surcharge; the gain on sale is taxable (cost by "
-                 "FIFO).", "source": _RD_369 + " (clauses 1–4)"},
+                 "FIFO).", "source": _RD_369 + " (clauses 1–4)",
+         "th": "ขายก่อนถือครบ 10 ปีนับจากวันซื้อ (ยกเว้นทุพพลภาพหรือเสียชีวิต): ต้องคืนภาษีของปีที่นำ SSF ไปลดหย่อน ภายใน 5 ปีนับจากวันยื่นแบบของปีนั้น "
+               "พร้อมเงินเพิ่มตามมาตรา 27 และกำไรจากการขายต้องเสียภาษี"},
         {"text": "Transfer to another SSF (same or another AMC, all or part) keeps the holding period only if "
-                 "completed within 5 business days of the transfer order.", "source": _RD_369 + " (clause 6)"},
+                 "completed within 5 business days of the transfer order.", "source": _RD_369 + " (clause 6)",
+         "th": "โอนไป SSF กองอื่น (บลจ. เดียวกันหรือต่าง บลจ.) ระยะถือนับต่อเมื่อโอนเสร็จภายใน 5 วันทำการนับจากวันสั่งโอน"},
         {"text": "SSF deductions cover purchases from 1 Jan 2020 to 31 Dec 2024 only — no new SSF purchases "
-                 "are deductible now.", "source": _RD_369 + " (clause 1)"},
-        {"text": "Moving the money to a non-SSF fund counts as selling the SSF.", "source": _RD_369},
+                 "are deductible now.", "source": _RD_369 + " (clause 1)",
+         "th": "สิทธิลดหย่อน SSF ครอบคลุมการซื้อระหว่าง 1 ม.ค. 2563 ถึง 31 ธ.ค. 2567 เท่านั้น"},
+        {"text": "Moving the money to a non-SSF fund counts as selling the SSF.", "source": _RD_369,
+         "th": "ย้ายเงินไปกองที่ไม่ใช่ SSF นับเป็นการขาย SSF"},
     ],
 }
 # Narrative constraint: while any lot of a tax scheme is not yet eligible, the report may only
@@ -279,3 +290,36 @@ async def portfolio_facts(db: AsyncSession, portfolio_id, month: date) -> dict:
         "watchlist": [{"fund_code": r["fund_code"], "reasons": [f["rule"] for f in r["flags"]], "flags": r["flags"]}
                       for r in sorted(rows, key=lambda r: (-len(r["flags"]), -(r["weight"] or 0))) if r["flags"]],
     }
+
+
+async def rmf_purchase_status(db: AsyncSession, user_id, month: date) -> dict | None:
+    """
+    RMF continuous-purchase rule (buy at least once a year, never pause > 1 consecutive year),
+    across ALL the user's portfolios. Skipping one year is allowed, so the report warns only
+    when the report is delivered in Q4 (Oct–Dec) and there was no RMF purchase last year AND
+    none yet this year. None when the user holds no RMF lot that still needs the rule.
+    Based on purchases recorded in this app only (purchases elsewhere aren't visible).
+    """
+    port_ids = [p for (p,) in (await db.execute(select(Portfolio.id).where(Portfolio.user_id == user_id))).all()]
+    if not port_ids:
+        return None
+    owner = await db.get(User, user_id)
+    dob = owner.date_of_birth if owner else None
+    locked = []
+    for pid in port_ids:
+        locked += [e for e in await portfolio_service.get_tax_eligibility(pid, db, month, dob)
+                   if e.tax_scheme == "RMF" and not e.is_eligible]
+    if not locked:
+        return None
+    buys = (await db.execute(select(Transaction.date).where(
+        Transaction.portfolio_id.in_(port_ids), Transaction.type == TransactionType.BUY.value,
+        Transaction.tax_scheme == "RMF"))).scalars().all()
+    years = sorted({d.year for d in buys})
+    delivery = pm.months_back(month, -1)            # report for September is read in October
+    year = delivery.year
+    warn = delivery.month >= 10 and (year - 1) not in years and year not in years
+    return {"purchase_years": years, "last_purchase": str(max(buys)) if buys else None,
+            "bought_last_year": (year - 1) in years, "bought_this_year": year in years,
+            "warn": warn, "year": year,
+            "rule": "Buy RMF at least once a year; never pause more than 1 consecutive year.",
+            "source": _RD_2158, "caveat": "Based on RMF purchases recorded in this app only."}

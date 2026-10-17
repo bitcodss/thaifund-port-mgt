@@ -13,6 +13,7 @@ from app.api import funds as funds_router_module
 from app.api import sync as sync_router_module
 from app.api import analytics as analytics_router_module
 from app.api import peers as peers_router_module
+from app.api import reports as reports_router_module
 from app.database import AsyncSessionLocal
 from app.models.fund import Fund, NavHistory
 from app.services import (factsheet_service, fund_category_service, news_service, peer_metrics, peer_service,
@@ -210,6 +211,7 @@ app.include_router(funds_router_module.router, prefix=API_PREFIX)
 app.include_router(sync_router_module.router, prefix=API_PREFIX)
 app.include_router(analytics_router_module.router, prefix=API_PREFIX)
 app.include_router(peers_router_module.router, prefix=API_PREFIX)
+app.include_router(reports_router_module.router, prefix=API_PREFIX)
 
 
 @app.get("/health")

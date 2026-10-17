@@ -120,3 +120,34 @@ async def test_loss_flag_measures_from_switch_in_not_tax_lot_cost(db):
     c = fund["narrative_constraints"]
     assert c["locked_schemes"] == ["RMF"] and "sell" in c["never_suggest"]
     assert all("RMF" in m or m == "hold" for m in c["allowed_moves"])
+
+
+@pytest.mark.parametrize("buy_years,month,warn", [
+    ([2024], date(2026, 9, 30), True),          # no buy 2025 nor 2026, report read in Oct → warn
+    ([2025], date(2026, 9, 30), False),         # bought last year: one skipped year is allowed
+    ([2024, 2026], date(2026, 10, 31), False),  # bought this year
+    ([2024], date(2026, 6, 30), False),         # report read in July: not Q4 yet
+    ([2024], date(2026, 12, 31), False),        # read in January: next year's check, not Q4
+])
+@pytest.mark.asyncio
+async def test_rmf_purchase_warning_only_after_a_skipped_year_in_q4(db, buy_years, month, warn):
+    from app.models.transaction import Transaction
+    user = User(id=uuid.uuid4(), email="r@x", password_hash="x", role="user", date_of_birth=date(1988, 1, 1))
+    port = Portfolio(id=uuid.uuid4(), user_id=user.id, name="RMF")
+    db.add_all([user, port, Fund(fund_code="R1", fund_status="RG")])
+    db.add(TaxLot(portfolio_id=port.id, fund_code="R1", original_purchase_date=date(2024, 3, 1),
+                  units_remaining=Decimal("10"), cost_basis_remaining=Decimal("100"), tax_scheme="RMF"))
+    for y in buy_years:
+        db.add(Transaction(portfolio_id=port.id, date=date(y, 3, 1), type="BUY", fund_code="R1",
+                           units=Decimal("10"), nav=Decimal("10"), amount=Decimal("100"), tax_scheme="RMF"))
+    await db.commit()
+    status = await rf.rmf_purchase_status(db, user.id, month)
+    assert status["warn"] is warn
+
+
+@pytest.mark.asyncio
+async def test_no_rmf_status_without_locked_rmf_lots(db):
+    user = User(id=uuid.uuid4(), email="n@x", password_hash="x", role="user")
+    db.add_all([user, Portfolio(id=uuid.uuid4(), user_id=user.id, name="SSF")])
+    await db.commit()
+    assert await rf.rmf_purchase_status(db, user.id, date(2026, 9, 30)) is None

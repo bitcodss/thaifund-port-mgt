@@ -115,6 +115,9 @@ export const api = {
   getFund: (fundCode: string) => request<FundDetail>("GET", `/funds/${encodeURIComponent(fundCode)}`),
   getCategoryOptions: () => request<CategoryOptions>("GET", "/funds/category-options"),
   getHeldPeerGroups: () => request<PeerGroup[]>("GET", "/peers/held"),
+  listReports: () => request<ReportListItem[]>("GET", "/reports"),
+  getReport: (month: string) => request<MonthlyReport>("GET", `/reports/${month}`),
+  buildReports: (month?: string) => request<{ month: string; started: boolean }>("POST", "/reports/build", { month: month || null }),
   getPeerThemes: () => request<Record<string, string[]>>("GET", "/peers/themes"),
   getPeerCategories: () => request<string[]>("GET", "/peers/categories"),
   getPendingCategories: () => request<PendingCategory[]>("GET", "/peers/pending"),
@@ -343,6 +346,21 @@ export interface PeerMaster {
   master_key: string | null;
   master_key_kind: "isin" | "name" | null;
   funds: PeerFund[];
+}
+
+export interface ReportListItem {
+  month: string;
+  status: "ok" | "partial" | "failed";
+  updated_at: string | null;
+  errors: number;
+}
+
+export interface MonthlyReport {
+  month: string;
+  status: "ok" | "partial" | "failed";
+  html: string | null;
+  errors: string[];
+  updated_at: string | null;
 }
 
 export interface PendingCategory {
