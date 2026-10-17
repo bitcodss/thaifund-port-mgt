@@ -96,7 +96,11 @@ numbers computed by code, poorly performing funds first. Local Ollama only.
   passive plain broad-index funds get the broad theme by rule — never an index that carves
   out a country (ex-US, ex-China…), except "ex Japan" in Asia Pacific Ex Japan.
 
-## Phase 3 — report builder (not built)
+## Phase 3 — report builder (built: report_builder.py, Reports page)
+- LLM sections are checked: numbers from the facts only, no advice, no "sell" for locked RMF/SSF,
+  no JSON keys, no invented periods, fund codes copied exactly; 2 retries, then a code template.
+- Signals reach the LLM as Thai sentences written by code (driver month included); the LLM
+  rephrases, never derives. The RMF purchase warning is code-rendered only.
 - Many funds share news tickers (TSM, BABA, TCEHY appear in ~6 funds). Mention shared
   drivers ONCE at portfolio level and refer to them from fund cards — never repeat the
   same story on every card.
