@@ -141,3 +141,15 @@ def test_signal_sentences_explain_only_listed_flags():
     assert "กรกฎาคม 2026" in s and "-33.8%" in s and "ไม่ใช่ผลงานแย่ต่อเนื่อง" in s
     f["flags"][0]["single_event"] = False
     assert "หลายเดือน" in rb.signal_sentences(f)[0]
+
+
+def test_misspelled_fund_code_rejected():
+    src = '{"กองทุน": "LHCYBERRMF", "ชื่อ": "SCBSEMI(SSF)"}'
+    assert rb.check_text("LHCYBERRRM สัดส่วน", set(), locked=False, source=src)
+    assert rb.check_text("LHCYBERRMF และ SCBSEMI(SSF) ทำได้ดี", set(), locked=False, source=src) == []
+
+
+def test_single_theme_category_not_repeated():
+    p = {"context_only": False, "category": "Global Equity - Alternative Energy",
+         "theme": "Global Equity - Alternative Energy", "peer_masters": 10}
+    assert rb.peer_method(p).count("Alternative Energy") == 1

@@ -55,6 +55,8 @@ _SELL_RX = re.compile(r"ขาย(?:ออก|คืน|หน่วย|กอ�
 # JSON keys leaking into prose ("return_3m", "since_entry") and invented horizons ("31-month")
 _KEY_RX = re.compile(r"\b[a-z]+_[a-z0-9_]+\b")
 _HORIZON_RX = re.compile(r"\d+\s*-?\s*months?\b", re.I)
+# fund-code-like tokens (LHCYBERRMF, SCBSEMI(SSF)) must be copied exactly from the facts
+_CODE_RX = re.compile(r"\b[A-Z0-9][A-Z0-9&\-]{4,}(?:\([A-Z0-9]+\))?")
 MOVES_TH = {
     "hold": "ถือต่อ",
     "switch to another RMF of the same AMC": "สับเปลี่ยนไป RMF กองอื่นใน บลจ. เดียวกัน",
@@ -165,7 +167,7 @@ Rules:
 - summary (2-4 sentences): each portfolio's value and how many funds are on the watch list, naming them.
 - shared_news (0-4 sentences): "ข่าวที่กระทบหลายกอง" — news moving several held funds at once, naming the
   funds affected. Empty string when there are none.
-- watch (1-3 sentences): what to watch next month. If "เตือน RMF" is present you MUST include it.
+- watch (1-3 sentences): what to watch next month, from the funds on the watch list only.
 {retry_note}
 Facts (JSON):
 {payload}"""
@@ -177,9 +179,11 @@ def _schema(fields: tuple[str, ...]) -> dict:
     return {"type": "object", "properties": {f: {"type": "string"} for f in fields}, "required": list(fields)}
 
 
-def check_text(text: str, allowed, locked: bool) -> list[str]:
-    """Problems that make an LLM section unusable (empty list = OK)."""
+def check_text(text: str, allowed, locked: bool, source: str = "") -> list[str]:
+    """Problems that make an LLM section unusable (empty list = OK). `source` = the facts text."""
     problems = []
+    if source and (codes := [c for c in _CODE_RX.findall(text) if c not in source]):
+        problems.append(f"fund codes / names not written exactly as in the facts: {', '.join(sorted(set(codes)))}")
     if bad := unsupported_numbers(text, allowed):
         problems.append(f"numbers not in the facts: {', '.join(bad)}")
     if _ADVICE_RX.search(text):
@@ -203,7 +207,7 @@ async def write_section(prompt: str, payload: dict, fields: tuple[str, ...], loc
         except LlmError as e:
             return None, str(e)
         section = {f: (out.get(f) or "").strip() for f in fields}
-        problems = check_text(" ".join(section.values()), allowed, locked)
+        problems = check_text(" ".join(section.values()), allowed, locked, source=text_payload)
         if not problems:
             return section, None
         retry_note = "Your previous answer had problems: " + "; ".join(problems) + ". Fix them."
@@ -240,7 +244,8 @@ def peer_method(p: dict) -> str:
     if p["context_only"]:
         return (f"เทียบกับทั้งหมวด {p['category']} เพราะกลุ่มสไตล์เดียวกันมีกองไม่พอ อันดับนี้ใช้ประกอบเท่านั้น "
                 "ไม่ได้บอกว่ากองทำได้ดีหรือแย่ในสไตล์ของตัวเอง")
-    return f"เทียบใน peer group ธีม {p['theme']} ของหมวด {p['category']} ({p['peer_masters']} กองหลักอื่น)"
+    group = p["category"] if p["theme"] == p["category"] else f"ธีม {p['theme']} ของหมวด {p['category']}"
+    return f"เทียบใน peer group {group} ({p['peer_masters']} กองหลักอื่น)"
 
 
 def fund_payload(f: dict, news: list[dict], shared: list[dict]) -> dict:
@@ -417,10 +422,8 @@ async def build_user_report(db: AsyncSession, user_id, month: date) -> MonthlyRe
         "ข่าวที่กระทบหลายกอง": [{"ชื่อ": n["name"] or n["ticker"], "กองที่ได้รับผล": n["funds"],
                                  "สรุปรายสัปดาห์": [w["summary"] for w in n["weeks"]]} for n in shared_news],
     }
-    if rmf and rmf["warn"]:
-        overview_payload["เตือน RMF"] = (f"ยังไม่พบการซื้อ RMF ในปี {rmf['year'] - 1} และปี {rmf['year']} "
-                                         "การเว้นซื้อเกินกว่า 1 ปีติดต่อกันทำให้ผิดเงื่อนไขทางภาษี "
-                                         "(ตรวจจากรายการที่บันทึกในแอปเท่านั้น)")
+    # the RMF purchase warning is rendered by code only (a box in the HTML) — never given to the LLM,
+    # which mentioned it even when it didn't apply
     overview, err = await write_section(_OVERVIEW_PROMPT, overview_payload, _OVERVIEW_FIELDS, locked=False)
     if err:
         errors.append(f"overview: {err}")
