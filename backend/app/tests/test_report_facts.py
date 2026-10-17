@@ -114,4 +114,9 @@ async def test_loss_flag_measures_from_switch_in_not_tax_lot_cost(db):
     assert facts["watchlist"][0]["reasons"] == ["loss_10pct"]
     lot = fund["tax_lots"][0]
     assert lot["scheme"] == "RMF" and lot["original_purchase_date"] == "2023-01-05" and lot["eligible"] is False
-    assert "RMF" in facts["tax_rules"] and any("transfer" in n for n in facts["tax_rules"]["RMF"]["notes"])
+    notes = facts["tax_rules"]["RMF"]["notes"]
+    assert any("transfer" in n["text"] for n in notes) and all(n["source"] for n in notes)
+    assert any("pause buying for more than 1 consecutive year" in n["text"] for n in notes)
+    c = fund["narrative_constraints"]
+    assert c["locked_schemes"] == ["RMF"] and "sell" in c["never_suggest"]
+    assert all("RMF" in m or m == "hold" for m in c["allowed_moves"])

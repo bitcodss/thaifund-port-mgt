@@ -106,6 +106,12 @@ numbers computed by code, poorly performing funds first. Local Ollama only.
   (LLM fallback) rank last.
 - Tax constraints: RMF/SSF/ThaiESG holding rules per lot; cross-AMC moves are transfers
   (allowed, slower), not instant switches.
+- Narrative rule: while a fund's RMF / SSF lots are not yet eligible, the report NEVER suggests
+  selling it or moving to a fund outside the scheme — only hold, switch within the AMC, or
+  transfer to another AMC's fund of the same scheme (facts: `narrative_constraints`).
+- Tax notes in the facts carry their source (Revenue Dept No. 369 for SSF; ruling กค 0702/2158,
+  2023, for RMF incl. the "never pause buying > 1 consecutive year" rule). Both schemes repay
+  tax for deducted years within 5 years of filing (+ s.27 surcharge), gain taxable.
 - Look-through exposure (top-5 only) and allocation drift vs last month.
 
 ## Phase 4 — delivery (not built)

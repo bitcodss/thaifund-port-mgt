@@ -43,23 +43,40 @@ BOTTOM_PCT = 25
 NAV_HISTORY_FROM = date(2015, 1, 31)
 
 # Scheme rules beyond the holding period (holding years / age come from tax_scheme_rules).
+# Verified 2026-10-17 against Revenue Department sources; each note carries its source.
+_RD_369 = "Revenue Dept announcement (income tax) No. 369, 13 Mar 2020 — https://www.rd.go.th/fileadmin/centralize/news_law_update/2563/03/dg369.pdf"
+_RD_2158 = "Revenue Dept ruling กค 0702/2158, 21 Apr 2023 (applying announcements No. 170/171) — https://www.rd.go.th/65449.html"
 TAX_SCHEME_NOTES = {
     "RMF": [
-        "Selling before the holding conditions are met breaks the tax condition: deductions claimed must be "
-        "repaid and the gain is taxable.",
-        "Switching to another RMF of the same AMC keeps the original purchase date and holding period.",
-        "Moving to another AMC is a transfer to that AMC's RMF (allowed, keeps the holding period) — slower "
-        "than a same-AMC switch, not an instant switch.",
-        "Moving the money to a non-RMF fund counts as selling the RMF.",
+        {"text": "Breaking the conditions (selling before holding 5 years from the first purchase AND age 55, or "
+                 "the purchase rule below): the tax for the years whose RMF purchases were deducted, within 5 years "
+                 "of each year's filing, must be paid back with the section 27 surcharge (waived if filed by March "
+                 "of the following year), and the gain on sale is taxable.", "source": _RD_2158},
+        {"text": "Purchase rule: buy RMF at least once a year and never pause buying for more than 1 consecutive "
+                 "year. Stopping RMF purchases altogether breaks the conditions.", "source": _RD_2158},
+        {"text": "Switching to another RMF of the same AMC keeps the original purchase date and holding period.",
+         "source": "app lot engine / plan"},
+        {"text": "Moving to another AMC is a transfer to that AMC's RMF (allowed, keeps the holding period); "
+                 "slower than a same-AMC switch.", "source": "plan (cross-AMC transfer rule)"},
+        {"text": "Moving the money to a non-RMF fund counts as selling the RMF.", "source": _RD_2158},
     ],
     "SSF": [
-        "Selling before the holding period is met breaks the tax condition: deductions claimed must be "
-        "repaid and the gain is taxable.",
-        "Switching to another SSF of the same AMC keeps the original purchase date and holding period.",
-        "Moving to another AMC is a transfer to that AMC's SSF (allowed, keeps the holding period) — slower "
-        "than a same-AMC switch, not an instant switch.",
-        "Moving the money to a non-SSF fund counts as selling the SSF.",
+        {"text": "Breaking the condition (selling before holding 10 years from purchase, except disability or "
+                 "death): the tax for the years whose SSF purchases were deducted, within 5 years of each year's "
+                 "filing, must be paid back with the section 27 surcharge; the gain on sale is taxable (cost by "
+                 "FIFO).", "source": _RD_369 + " (clauses 1–4)"},
+        {"text": "Transfer to another SSF (same or another AMC, all or part) keeps the holding period only if "
+                 "completed within 5 business days of the transfer order.", "source": _RD_369 + " (clause 6)"},
+        {"text": "SSF deductions cover purchases from 1 Jan 2020 to 31 Dec 2024 only — no new SSF purchases "
+                 "are deductible now.", "source": _RD_369 + " (clause 1)"},
+        {"text": "Moving the money to a non-SSF fund counts as selling the SSF.", "source": _RD_369},
     ],
+}
+# Narrative constraint: while any lot of a tax scheme is not yet eligible, the report may only
+# discuss moves that keep the scheme — never "sell".
+ALLOWED_MOVES = {
+    "RMF": ["hold", "switch to another RMF of the same AMC", "transfer to another AMC's RMF"],
+    "SSF": ["hold", "switch to another SSF of the same AMC", "transfer to another AMC's SSF (within 5 business days)"],
 }
 
 
@@ -149,6 +166,16 @@ def peer_facts(s: PeerSnapshot | None) -> dict | None:
     }
 
 
+def _constraints(tax_lots: list[dict]) -> dict | None:
+    """Locked scheme lots → never suggest selling; only hold / switch / transfer within the scheme."""
+    locked = sorted({t["scheme"] for t in tax_lots if not t["eligible"] and t["scheme"] in ALLOWED_MOVES})
+    if not locked:
+        return None
+    return {"never_suggest": ["sell", "move to a fund outside the scheme"], "locked_schemes": locked,
+            "allowed_moves": [m for sch in locked for m in ALLOWED_MOVES[sch]],
+            "eligible_dates": sorted({t["eligible_date"] for t in tax_lots if t["eligible_date"]})}
+
+
 async def portfolio_facts(db: AsyncSession, portfolio_id, month: date) -> dict:
     """Facts + flags for one portfolio at a month-end."""
     portfolio = await db.get(Portfolio, portfolio_id)
@@ -232,6 +259,7 @@ async def portfolio_facts(db: AsyncSession, portfolio_id, month: date) -> dict:
             "entry_dates": sorted(str(d) for d in h["entry_dates"]), "entry_basis": sorted(h["entry_how"]),
             "pnl_lot_cost_pct": pnl_lot,     # incl. the previous fund's result (tax-lot cost)
             "tax_lots": tax_by_code.get(code, []),
+            "narrative_constraints": _constraints(tax_by_code.get(code, [])),
             "missing_month_end_nav": nav is None, **own, "z_1m": z["1m"], "z_3m": z["3m"],
             "peers": peer_facts(snap), "flags": flags,
         })
