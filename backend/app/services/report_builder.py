@@ -52,6 +52,17 @@ RULE_TH = {
 }
 # selling / redeeming wording (not "แรงขาย" = selling pressure in market news)
 _SELL_RX = re.compile(r"ขาย(?:ออก|คืน|หน่วย|กอง|ทิ้ง)|ไถ่ถอน|\bsell\b|\bredeem", re.I)
+# JSON keys leaking into prose ("return_3m", "since_entry") and invented horizons ("31-month")
+_KEY_RX = re.compile(r"\b[a-z]+_[a-z0-9_]+\b")
+_HORIZON_RX = re.compile(r"\d+\s*-?\s*months?\b", re.I)
+MOVES_TH = {
+    "hold": "ถือต่อ",
+    "switch to another RMF of the same AMC": "สับเปลี่ยนไป RMF กองอื่นใน บลจ. เดียวกัน",
+    "transfer to another AMC's RMF": "โอนย้ายไป RMF ของ บลจ. อื่น",
+    "switch to another SSF of the same AMC": "สับเปลี่ยนไป SSF กองอื่นใน บลจ. เดียวกัน",
+    "transfer to another AMC's SSF (within 5 business days)": "โอนย้ายไป SSF ของ บลจ. อื่น (ต้องเสร็จภายใน 5 วันทำการ)",
+}
+MIN_FX_MENTION = 0.001       # FX effect below 0.1% isn't worth a sentence
 _ADVICE_RX = re.compile(r"ควร(?:ซื้อ|ขาย|สับเปลี่ยน|ถือ)|แนะนำให้(?:ซื้อ|ขาย|สับเปลี่ยน|ถือ)|"
                         r"\bshould (?:buy|sell|switch|hold)\b", re.I)
 
@@ -120,21 +131,21 @@ async def news_for_projects(db: AsyncSession, proj_ids: set[str], month: date) -
 # ── LLM sections ──────────────────────────────────────────────────────────────
 
 _FUND_PROMPT = """You write one fund card of a monthly portfolio report for a Thai retail investor.
-Write in Thai; keep technical terms in English (percentile, peer group, hedge, NAV, FX).
+Write natural Thai; keep technical terms in English (percentile, peer group, hedge, NAV, FX).
 Use ONLY the facts JSON below; add no outside knowledge.
 Rules:
-- Copy numbers exactly as written in the facts (digits, same rounding). Never compute new numbers.
-  Never write numbers as words.
+- Copy numbers exactly as written in the facts. Never compute new numbers, never write numbers as words,
+  never invent periods (only 1 เดือน, 3 เดือน, 1 ปี and "ตั้งแต่เข้ากองนี้" exist).
+- Never write the JSON keys themselves; write normal Thai sentences.
 - Signal language only: say what happened and what to watch. Never tell the reader to buy, sell, switch or hold.
-- If "constraints" is present: never mention selling or redeeming this fund. Only when "flags" is not empty
-  you may state, as information and not advice, that the moves available without breaking the tax
-  conditions are those in constraints.allowed_moves.
-- A flag bottom_3m with single_event = true: say the 3-month result comes mainly from the drop in its
-  driver month, not from persistent weakness. With single_event = false, say it was weak across months.
-- peers.context_only = true: say the comparison is with the whole AIMC category because the style group
-  has too few funds, so the rank is context only.
-- peers.display = "rank": use the rank (อันดับ X จาก N), not a percentile.
-- news: summarise only the "news" items (largest holdings first). For "shared_news" only name them and
+- "สัญญาณที่ต้องจับตา": explain these signals using the sentences given, in your own words but with the
+  same meaning. Do NOT add signals or explanations that are not listed. If the list is empty, do not
+  describe the fund as weak or as having a problem.
+- "ข้อจำกัดภาษี" (when present): never mention selling or redeeming this fund. Only when
+  "สัญญาณที่ต้องจับตา" is not empty, you may add, as information and not advice, that the moves that keep
+  the tax conditions are those listed in "ทางเลือกที่ไม่ผิดเงื่อนไข".
+- "เทียบกับกองอื่น": follow "วิธีเทียบ" exactly (it says whether the rank is only context).
+- news: summarise only "ข่าว" (largest holdings first). For "ข่าวที่เล่าในภาพรวมพอร์ต" only name them and
   say they are covered in the portfolio overview. No news → empty string.
 - Fields: headline (1 sentence), performance (2-3 sentences), peers (1-2 sentences),
   news (0-3 sentences), watch (1-2 sentences on what to watch next month).
@@ -145,17 +156,16 @@ Facts (JSON):
 _FUND_FIELDS = ("headline", "performance", "peers", "news", "watch")
 
 _OVERVIEW_PROMPT = """You write the overview of a monthly portfolio report for a Thai retail investor.
-Write in Thai; keep technical terms in English.
+Write natural Thai; keep technical terms in English.
 Use ONLY the facts JSON below; add no outside knowledge.
 Rules:
 - Copy numbers exactly as written in the facts. Never compute new numbers. Never write numbers as words.
+- Never write the JSON keys themselves; write normal Thai sentences.
 - Signal language only. Never tell the reader to buy, sell, switch or hold.
-- summary (2-4 sentences): the month for each portfolio and how many funds are on the watchlist.
-- shared_news (0-4 sentences): the shared drivers — news that moves several held funds at once, naming the
+- summary (2-4 sentences): each portfolio's value and how many funds are on the watch list, naming them.
+- shared_news (0-4 sentences): "ข่าวที่กระทบหลายกอง" — news moving several held funds at once, naming the
   funds affected. Empty string when there are none.
-- watch (1-3 sentences): what to watch next month. If rmf_purchase.warn is true you MUST say that no RMF
-  purchase is recorded for last year or this year yet, and that pausing RMF purchases for more than one
-  consecutive year breaks the RMF tax conditions (based on purchases recorded in this app).
+- watch (1-3 sentences): what to watch next month. If "เตือน RMF" is present you MUST include it.
 {retry_note}
 Facts (JSON):
 {payload}"""
@@ -174,6 +184,10 @@ def check_text(text: str, allowed, locked: bool) -> list[str]:
         problems.append(f"numbers not in the facts: {', '.join(bad)}")
     if _ADVICE_RX.search(text):
         problems.append("buy/sell/switch/hold advice")
+    if keys := _KEY_RX.findall(text):
+        problems.append(f"JSON keys in the text ({', '.join(sorted(set(keys)))}) — write Thai instead")
+    if _HORIZON_RX.search(text):
+        problems.append("a period that is not in the facts (only 1 เดือน, 3 เดือน, 1 ปี)")
     if locked and _SELL_RX.search(text):
         problems.append("mentions selling or redeeming a fund whose RMF/SSF lots are locked")
     return problems
@@ -198,42 +212,69 @@ async def write_section(prompt: str, payload: dict, fields: tuple[str, ...], loc
 
 # ── payloads + templates ──────────────────────────────────────────────────────
 
-def fund_payload(f: dict, news: list[dict], shared: list[dict]) -> dict:
-    p = f["peers"] or {}
-    flags = []
+def signal_sentences(f: dict) -> list[str]:
+    """Each flag as a Thai sentence written by code — the LLM rephrases, never derives."""
+    out = []
     for fl in f["flags"]:
-        item = {"rule": fl["rule"], "meaning": RULE_TH[fl["rule"]]}
-        if fl["rule"] == "bottom_3m":
-            item.update({"single_event": fl["single_event"],
-                         "driver_month": thai_month(fl["driver"]["month"]) if fl.get("driver") else None,
-                         "driver_month_return": pct(fl["driver"]["return_1m"]) if fl.get("driver") else None,
-                         "percentile_3m": None if fl["percentile_3m"] is None else round(fl["percentile_3m"]),
-                         "rank_3m": fl.get("rank_3m")})
+        if fl["rule"] == "abnormal_1m":
+            out.append(f"ผลตอบแทน 1 เดือน {pct(fl['return_1m'])} ต่ำผิดปกติเมื่อเทียบกับความผันผวนของกองเอง")
+        elif fl["rule"] == "abnormal_3m":
+            out.append(f"ผลตอบแทน 3 เดือน {pct(fl['return_3m'])} ต่ำผิดปกติเมื่อเทียบกับความผันผวนของกองเอง")
         elif fl["rule"] == "loss_10pct":
-            item["since_entry"] = pct(fl["pnl_pct"])
-        else:
-            item["return"] = pct(fl.get("return_1m", fl.get("return_3m")))
-        flags.append(item)
-    return {
-        "fund": f["fund_code"], "name": f["name_en"], "weight": pct(f["weight"]).lstrip("+"),
-        "return_1m": pct(f["return_1m"]), "return_3m": pct(f["return_3m"]), "return_1y": pct(f["return_1y"]),
-        "since_entry": pct(f["pnl_pct"]),
-        "peers": None if not p else {
-            "category": p["category"], "theme": p["theme"], "basis": p["basis"], "context_only": p["context_only"],
-            "display": p["display"], "other_masters": p["peer_masters"],
-            "percentile_3m": None if p["percentile_3m"] is None else round(p["percentile_3m"]),
-            "rank_3m": (p.get("ranks") or {}).get("3m"),
-            "peer_median_3m": pct(p["peer_median_3m"]),
-            "fx_adjusted": p["hedge_basis"] == "fx_adjusted",
-            "fx_effect_1m": pct(p["fx"]["effect_1m"]), "currency": p["fx"]["currency"],
-            "vs_same_master_3m": pct(p["vs_same_master_3m"]) if p.get("vs_same_master_3m") is not None else None,
-        },
-        "flags": flags,
-        "constraints": f["narrative_constraints"],
-        "news": [{"ticker": n["ticker"], "name": n["label"], "holding_weight": n["weight_pct"],
-                  "weeks": n["digests"]} for n in news],
-        "shared_news": [{"ticker": n["ticker"], "name": n["label"]} for n in shared],
+            out.append(f"ขาดทุน {pct(fl['pnl_pct'])} นับตั้งแต่เข้ากองนี้")
+        elif fl["rule"] == "bottom_3m":
+            pos = (f"อันดับ {fl['rank_3m'][0]} จาก {fl['rank_3m'][1]}" if fl.get("display") == "rank" and fl.get("rank_3m")
+                   else f"percentile {fl['percentile_3m']:.0f}")
+            text = f"ผลตอบแทน 3 เดือนอยู่กลุ่มท้ายของ peer group สองเดือนติด ({pos})"
+            d = fl.get("driver")
+            if fl["single_event"] and d:
+                text += (f" สาเหตุหลักคือการลดลง {pct(d['return_1m'])} ในเดือน{thai_month(d['month'])} เดือนเดียว"
+                         " ไม่ใช่ผลงานแย่ต่อเนื่อง")
+            else:
+                text += " ผลงานอ่อนกว่ากลุ่มในหลายเดือน ไม่ได้มาจากเดือนเดียว"
+            out.append(text)
+    return out
+
+
+def peer_method(p: dict) -> str:
+    if p["context_only"]:
+        return (f"เทียบกับทั้งหมวด {p['category']} เพราะกลุ่มสไตล์เดียวกันมีกองไม่พอ อันดับนี้ใช้ประกอบเท่านั้น "
+                "ไม่ได้บอกว่ากองทำได้ดีหรือแย่ในสไตล์ของตัวเอง")
+    return f"เทียบใน peer group ธีม {p['theme']} ของหมวด {p['category']} ({p['peer_masters']} กองหลักอื่น)"
+
+
+def fund_payload(f: dict, news: list[dict], shared: list[dict]) -> dict:
+    p = f["peers"]
+    peers = None
+    if p:
+        r = (p.get("ranks") or {}).get("3m")
+        peers = {"วิธีเทียบ": peer_method(p),
+                 "ผล 3 เดือน": (f"อันดับ {r[0]} จาก {r[1]}" if p["display"] == "rank" and r else
+                                None if p["percentile_3m"] is None else
+                                f"percentile {p['percentile_3m']:.0f} (0 = แย่สุด, 100 = ดีสุด)"),
+                 "median ของกลุ่ม 3 เดือน": pct(p["peer_median_3m"])}
+        if p["hedge_basis"] == "fx_adjusted":
+            peers["หมายเหตุ"] = "ปรับผลของค่าเงินให้เทียบกันได้แล้ว เพราะกองในกลุ่มป้องกันความเสี่ยงค่าเงินต่างกัน"
+        fx = p["fx"]["effect_1m"]
+        if fx is not None and abs(fx) >= MIN_FX_MENTION:
+            peers[f"ผลของค่าเงิน ({p['fx']['currency']}) ต่อผลตอบแทน 1 เดือน"] = pct(fx)
+        if p.get("vs_same_master_3m") is not None:
+            peers["ต่างจาก feeder อื่นของกองหลักเดียวกัน (3 เดือน)"] = pct(p["vs_same_master_3m"])
+    out = {
+        "กองทุน": f["fund_code"], "ชื่อ": f["name_en"], "สัดส่วนในพอร์ต": pct(f["weight"]).lstrip("+"),
+        "ผลตอบแทน": {"1 เดือน": pct(f["return_1m"]), "3 เดือน": pct(f["return_3m"]), "1 ปี": pct(f["return_1y"])},
+        "กำไรขาดทุนตั้งแต่เข้ากองนี้": pct(f["pnl_pct"]),
+        "เทียบกับกองอื่น": peers,
+        "สัญญาณที่ต้องจับตา": signal_sentences(f),
+        "ข่าว": [{"ชื่อ": n["label"] or n["ticker"], "สัดส่วนใน top holdings": n["weight_pct"],
+                  "สรุปรายสัปดาห์": [w["summary"] for w in n["digests"]]} for n in news],
+        "ข่าวที่เล่าในภาพรวมพอร์ต": [n["label"] or n["ticker"] for n in shared],
     }
+    nc = f["narrative_constraints"]
+    if nc:
+        out["ข้อจำกัดภาษี"] = {"ห้ามพูดถึง": "การขายหรือไถ่ถอนกองนี้",
+                               "ทางเลือกที่ไม่ผิดเงื่อนไข": [MOVES_TH.get(m, m) for m in nc["allowed_moves"]]}
+    return out
 
 
 def fund_template(f: dict) -> dict:
@@ -241,7 +282,7 @@ def fund_template(f: dict) -> dict:
     if not p:
         peers = "ยังไม่มีข้อมูล peer group"
     elif p["context_only"]:
-        peers = f"เทียบกับทั้งหมวด {p['category']} (กลุ่มสไตล์เดียวกันมีกองไม่พอ): {peer_cell(p)}"
+        peers = f"{peer_method(p)}: {peer_cell(p)}"
     else:
         peers = f"peer group {p['theme']} ({p['category']}): {peer_cell(p)}, median 3 เดือน {pct(p['peer_median_3m'])}"
     return {
@@ -249,7 +290,7 @@ def fund_template(f: dict) -> dict:
         "performance": f"ผลตอบแทน 1 เดือน {pct(f['return_1m'])}, 3 เดือน {pct(f['return_3m'])}, "
                        f"1 ปี {pct(f['return_1y'])} · ตั้งแต่เข้ากองนี้ {pct(f['pnl_pct'])}",
         "peers": peers, "news": "",
-        "watch": " · ".join(RULE_TH[x["rule"]] for x in f["flags"]) or "ไม่มีสัญญาณที่ต้องจับตา",
+        "watch": " · ".join(signal_sentences(f)) or "ไม่มีสัญญาณที่ต้องจับตา",
     }
 
 
@@ -369,13 +410,17 @@ async def build_user_report(db: AsyncSession, user_id, month: date) -> MonthlyRe
                             "funds": sorted(code_of[p] for p in ticker_projects[t] if p in code_of),
                             "weeks": item["digests"]})
     overview_payload = {
-        "month": thai_month(month),
-        "portfolios": [{"name": p["name"], "value": money(p["value"]), "funds": len(p["funds"]),
-                        "watchlist": [{"fund": w["fund_code"], "reasons": [RULE_TH[r] for r in w["reasons"]]}
+        "เดือน": thai_month(month),
+        "พอร์ต": [{"ชื่อ": p["name"], "มูลค่า": money(p["value"]), "จำนวนกอง": len(p["funds"]),
+                   "กองที่ควรจับตา": [{"กอง": w["fund_code"], "เหตุผล": [RULE_TH[r] for r in w["reasons"]]}
                                       for w in watchlist if w["portfolio"] == p["name"]]} for p in portfolios],
-        "shared_news": shared_news,
-        "rmf_purchase": rmf and {"warn": rmf["warn"], "year": rmf["year"]},
+        "ข่าวที่กระทบหลายกอง": [{"ชื่อ": n["name"] or n["ticker"], "กองที่ได้รับผล": n["funds"],
+                                 "สรุปรายสัปดาห์": [w["summary"] for w in n["weeks"]]} for n in shared_news],
     }
+    if rmf and rmf["warn"]:
+        overview_payload["เตือน RMF"] = (f"ยังไม่พบการซื้อ RMF ในปี {rmf['year'] - 1} และปี {rmf['year']} "
+                                         "การเว้นซื้อเกินกว่า 1 ปีติดต่อกันทำให้ผิดเงื่อนไขทางภาษี "
+                                         "(ตรวจจากรายการที่บันทึกในแอปเท่านั้น)")
     overview, err = await write_section(_OVERVIEW_PROMPT, overview_payload, _OVERVIEW_FIELDS, locked=False)
     if err:
         errors.append(f"overview: {err}")

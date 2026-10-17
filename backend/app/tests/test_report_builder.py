@@ -88,8 +88,8 @@ async def test_build_uses_checked_llm_text_falls_back_to_template_and_renders(db
     async def fake_llm(prompt, schema, **kw):
         calls["n"] += 1
         fields = list(schema["properties"])
-        if "fund card" in prompt and '"fund": "SEMI-RMF"' in prompt:
-            assert '"ticker": "NVDA"' in prompt and '"shared_news": [{"ticker": "TSM"' in prompt
+        if "fund card" in prompt and '"กองทุน": "SEMI-RMF"' in prompt:
+            assert '"ชื่อ": "NVDA"' in prompt and '"ข่าวที่เล่าในภาพรวมพอร์ต": ["TSM"]' in prompt
             return {f: "ขึ้น +9.6% ในเดือนนี้" for f in fields}                     # numbers from the facts
         if "fund card" in prompt:
             return {f: "อาจขายคืนหน่วยลงทุนได้ 55%" for f in fields}                # locked + bad number → template
@@ -123,3 +123,21 @@ def test_users_cannot_read_other_users_reports_but_admins_can():
         _target(user, other)
     assert e.value.status_code == 403
     assert _target(admin, other) == other
+
+
+def test_json_keys_and_invented_periods_rejected():
+    allowed = rb.allowed_from_text("-31.0%")
+    assert rb.check_text("ผลตอบแทน return_3m อยู่ที่ -31.0%", allowed, locked=False)
+    assert rb.check_text("ผลตอบแทน 31-month อยู่ที่ -31.0%", allowed, locked=False)
+    assert rb.check_text("ผลตอบแทน 3 เดือนอยู่ที่ -31.0%", allowed, locked=False) == []
+
+
+def test_signal_sentences_explain_only_listed_flags():
+    base = {"flags": []}
+    assert rb.signal_sentences(base) == []
+    f = {"flags": [{"rule": "bottom_3m", "display": "percentile", "percentile_3m": 11.0, "single_event": True,
+                    "driver": {"month": "2026-07-31", "return_1m": -0.338}}]}
+    s = rb.signal_sentences(f)[0]
+    assert "กรกฎาคม 2026" in s and "-33.8%" in s and "ไม่ใช่ผลงานแย่ต่อเนื่อง" in s
+    f["flags"][0]["single_event"] = False
+    assert "หลายเดือน" in rb.signal_sentences(f)[0]
