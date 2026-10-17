@@ -194,3 +194,16 @@ class TestCurrencyAndSmallGroups:
         assert s.details["ranks"]["1m"] == [1, 5] and s.details["small_group"] is True
         assert s.details["currency"] == "JPY" and float(s.fx_effect_1m) == pytest.approx(-0.05)
         assert set(s.details["months_in_3m"]) == {"2026-09-30", "2026-08-31", "2026-07-31"}
+
+
+@pytest.mark.asyncio
+async def test_thin_fx_pair_uses_usd_cross_rate(db):
+    from unittest.mock import AsyncMock, patch
+    days = [date(2026, 1, 1) + timedelta(days=i) for i in range(300)]
+    data = {"THB=X": [(d, 32.0) for d in days], "CNYTHB=X": [(days[-1], 5.0)], "CNY=X": [(d, 6.4) for d in days]}
+    with patch("app.services.peer_metrics.FX_TICKERS", {"USD": "THB=X", "CNY": "CNYTHB=X"}), \
+            patch("app.services.yahoo_client.history", new=AsyncMock(side_effect=lambda t, r: data[t])):
+        out = await pm.sync_fx(db)
+    assert out == {"USD": 300, "CNY": 300}
+    rate = (await db.execute(select(FxRate.rate).where(FxRate.pair == "CNYTHB"))).scalars().first()
+    assert float(rate) == pytest.approx(5.0)                             # 32 / 6.4

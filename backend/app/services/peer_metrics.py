@@ -44,6 +44,7 @@ HORIZONS = {"1m": 1, "3m": 3, "6m": 6, "1y": 12}
 SMALL_GROUP = 8             # masters incl. the fund: below this, rank instead of percentile
 FX_TICKERS = {"USD": "THB=X", "EUR": "EURTHB=X", "JPY": "JPYTHB=X", "HKD": "HKDTHB=X",
               "CNY": "CNYTHB=X", "GBP": "GBPTHB=X", "SGD": "SGDTHB=X"}
+MIN_FX_ROWS = 200            # fewer daily rows from a direct pair → use the USD cross rate
 _THAI_CCY = (("USD", r"ดอลล[า่]+ร์?\s*สหรัฐ|ดอลล[า่]+ร์?\s*(?:สรอ|US)"), ("HKD", r"ดอลล[า่]+ร์?\s*ฮ่องกง"),
              ("SGD", r"ดอลล[า่]+ร์?\s*สิงคโปร์"), ("EUR", r"ยูโร"), ("JPY", r"เยน"), ("CNY", r"หยวน"),
              ("GBP", r"ปอนด์"))
@@ -142,9 +143,16 @@ class MonthEnds:
 async def sync_fx(db: AsyncSession) -> dict[str, int]:
     """Daily closes vs THB for every currency in FX_TICKERS (Yahoo, 2 years) → fx_rates."""
     out = {}
+    usd: dict[date, float] = {}
     for ccy, ticker in FX_TICKERS.items():
         try:
             rows = await yahoo_client.history(ticker, "2y")
+            if ccy == "USD":
+                usd = dict(rows)
+            elif len(rows) < MIN_FX_ROWS and usd:
+                # thin direct pair (Yahoo CNYTHB=X has ~1 row) → cross via USD: USDTHB / USDccy
+                cross = dict(await yahoo_client.history(f"{ccy}=X", "2y"))
+                rows = [(d, usd[d] / v) for d, v in sorted(cross.items()) if d in usd and v]
         except yahoo_client.YahooError as e:
             logger.warning("FX %s sync failed: %s", ccy, e)
             continue
