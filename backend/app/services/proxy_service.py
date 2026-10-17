@@ -1,9 +1,8 @@
 """
 Proxy tickers per SEC fund project, for the monthly report.
 
-- kind="price": index/ETF whose price shows what the fund's market did.
-  Must have >= MIN_HISTORY_DAYS of Yahoo history (some indices, e.g. China
-  STAR 50, return almost nothing).
+Price proxies were dropped (chunk 5): trend / drawdown / volatility come from the
+fund's own NAV and peers (peer_metrics).
 - kind="news": tickers to collect headlines for, taken from REAL holdings:
     source="holding"   — direct-stock fund: its own SEC top-5 holdings
     source="factsheet" — feeder fund: the master fund's top 5 from the Thai
@@ -42,13 +41,11 @@ from app.services.yahoo_client import YahooError
 
 logger = logging.getLogger(__name__)
 
-KINDS = ("price", "news")
-MIN_HISTORY_DAYS = 200
+KINDS = ("news",)
 # A news proxy is only useful if Yahoo actually publishes about it: broad region
 # ETFs (EEM, EWJ, URTH…) often have no headlines for weeks.
 MIN_RECENT_NEWS = 3
 RECENT_NEWS_DAYS = 14
-MAX_PRICE_PROXIES = 2
 MAX_NEWS_PROXIES = 5
 MIN_HOLDING_TICKERS = 2
 HOLDING_SOURCES = ("holding", "factsheet")
@@ -72,13 +69,11 @@ _FEEDER_STYLES = {"AN", "PN", "IN", "LN"}
 
 _PROMPT = """You pick market tickers (Yahoo Finance symbols) that represent a Thai mutual fund.
 
-price_proxies (1-2): an index or broad ETF whose price best tracks this fund's market and benchmark.
-  Prefer long-history, liquid symbols (e.g. ^GSPC, SPY, ACWI, URTH, EEM, AAXJ, EWJ, ^N225, SMH, XLV, ICLN, GDX, CIBR, MCHI).
 news_proxies (1-3): symbols whose news explains this fund's moves: a liquid US-listed theme ETF or major stocks in the theme.
   NEVER use index symbols starting with "^" for news.
   Broad region/country ETFs (EEM, EWJ, URTH, EFA, AAXJ, MCHI, INDA) get almost no news coverage: for broad-market
   region funds use the region's 2-3 largest US-listed stocks or ADRs instead (e.g. Asia: TSM, BABA; Japan: TM, SONY).
-  (news_proxies are only used when the fund's real holdings can't be resolved.)
+  (used only because the fund's real holdings can't be resolved.)
 If the master fund is itself an ETF, include it or its US-listed twin. Use only real Yahoo Finance symbols.
 
 Fund (JSON):
@@ -87,16 +82,12 @@ Fund (JSON):
 _SCHEMA = {
     "type": "object",
     "properties": {
-        "price_proxies": {"type": "array", "minItems": 1, "maxItems": MAX_PRICE_PROXIES, "items": {
-            "type": "object",
-            "properties": {"ticker": {"type": "string"}, "name": {"type": "string"}, "reason": {"type": "string"}},
-            "required": ["ticker", "name", "reason"]}},
         "news_proxies": {"type": "array", "minItems": 1, "maxItems": 3, "items": {
             "type": "object",
             "properties": {"ticker": {"type": "string"}, "name": {"type": "string"}, "reason": {"type": "string"}},
             "required": ["ticker", "name", "reason"]}},
     },
-    "required": ["price_proxies", "news_proxies"],
+    "required": ["news_proxies"],
 }
 
 
@@ -173,12 +164,8 @@ async def resolve_holding(name: str) -> dict | None:
 
 
 async def validate(kind: str, ticker: str) -> tuple[bool, int | None]:
-    """price: needs MIN_HISTORY_DAYS of closes. news: non-index symbol with
-    >= MIN_RECENT_NEWS headlines in the last RECENT_NEWS_DAYS."""
+    """news: non-index symbol with >= MIN_RECENT_NEWS headlines in the last RECENT_NEWS_DAYS."""
     try:
-        if kind == "price":
-            days = len(await yahoo_client.history(ticker, "2y"))
-            return days >= MIN_HISTORY_DAYS, days
         if ticker.startswith("^"):
             return False, None
         cutoff = datetime.now(timezone.utc) - timedelta(days=RECENT_NEWS_DAYS)
@@ -214,23 +201,18 @@ async def news_from_holdings(fund: Fund, factsheet: FundFactsheet | None) -> tup
 
 async def suggest(fund: Fund, factsheet: FundFactsheet | None = None) -> dict[str, list[dict]]:
     """Candidate proxies per kind: [{ticker, label, source, reason, valid?}]."""
-    out: dict[str, list[dict]] = {"price": [], "news": []}
+    out: dict[str, list[dict]] = {"news": []}
     out["news"], why_not = await news_from_holdings(fund, factsheet)
-    llm = await generate_json(
-        _PROMPT.format(data=json.dumps(proxy_inputs(fund, factsheet), ensure_ascii=False)), _SCHEMA,
-    )
-    for p in llm.get("price_proxies") or []:
-        t = (p.get("ticker") or "").strip().upper()
-        if t and all(t != c["ticker"] for c in out["price"]):
-            out["price"].append({"ticker": t, "label": p.get("name"), "source": "ai", "reason": p.get("reason")})
     if not out["news"]:
         # Fallback only — never mixed with holding tickers; flagged unverified downstream.
+        llm = await generate_json(
+            _PROMPT.format(data=json.dumps(proxy_inputs(fund, factsheet), ensure_ascii=False)), _SCHEMA,
+        )
         for p in llm.get("news_proxies") or []:
             t = (p.get("ticker") or "").strip().upper()
             if t and all(t != c["ticker"] for c in out["news"]):
                 out["news"].append({"ticker": t, "label": p.get("name"), "source": "ai",
                                     "reason": f"Unverified LLM fallback ({why_not}): {p.get('reason')}"})
-    out["price"] = out["price"][:MAX_PRICE_PROXIES]
     out["news"] = out["news"][:MAX_NEWS_PROXIES]
     return out
 

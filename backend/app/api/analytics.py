@@ -156,6 +156,16 @@ async def _build_ai_data(portfolio_id: UUID, db: AsyncSession) -> dict:
     }
 
 
+@router.get("/portfolios/{portfolio_id}/report-facts")
+async def report_facts(portfolio_id: UUID, month: date | None = None, db: AsyncSession = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    """Monthly-report facts + watchlist for a month-end (default: last complete month)."""
+    await _check_portfolio_access(portfolio_id, user, db)
+    from app.services import peer_metrics, report_facts as rf
+    m = peer_metrics.month_end(month) if month else peer_metrics.last_complete_month(today_ict())
+    return await rf.portfolio_facts(db, portfolio_id, m)
+
+
 @router.get("/funds/{fund_code}/performance", response_model=FundPerformance)
 async def fund_performance(
     fund_code: str,

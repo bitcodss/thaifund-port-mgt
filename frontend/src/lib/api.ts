@@ -396,7 +396,7 @@ export interface PeerSnapshot {
 }
 
 export interface FundProxy {
-  kind: "price" | "news";
+  kind: "news";
   ticker: string;
   label: string | null;
   source: "holding" | "factsheet" | "ai" | "manual";

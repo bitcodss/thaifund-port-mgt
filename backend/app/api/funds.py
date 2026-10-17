@@ -141,7 +141,7 @@ async def set_fund_proxies(
     db: AsyncSession = Depends(get_db),
     _=Depends(require_admin),
 ):
-    """Admin override of price or news proxies (validated against Yahoo). Empty list = back to auto."""
+    """Admin override of news proxies (validated against Yahoo). Empty list = back to auto."""
     if kind not in proxy_service.KINDS:
         raise HTTPException(status_code=422, detail=f"kind must be one of {proxy_service.KINDS}")
     proj_id = await _proj_id(fund_code, db)

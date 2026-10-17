@@ -199,7 +199,7 @@ async def trigger_fund_categorisation(
 
 @router.post("/proxies")
 async def trigger_proxy_refresh(background_tasks: BackgroundTasks, force: bool = False, _=Depends(require_admin)):
-    """Suggest + validate price/news proxy tickers for portfolio funds (manual overrides kept)."""
+    """Suggest + validate news proxy tickers for portfolio funds (manual overrides kept)."""
     background_tasks.add_task(_run_proxies, force)
     return {"status": "started", "message": "Proxy refresh running in background"}
 

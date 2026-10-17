@@ -79,6 +79,19 @@ numbers computed by code, poorly performing funds first. Local Ollama only.
   style is out of favour. For these, rank is shown as context only, the report states plainly
   that the comparison is the whole category because the style group is too small, and only
   the two own-history rules and the −10% rule can flag. Monthly snapshots record the basis.
+- Bottom-quartile flag uses the 3M return. 3M windows of consecutive months overlap, so one bad
+  month can keep a fund at the bottom for up to three reports: the facts name the month that drove
+  each 3M window and mark `single_event` when both flagged windows share it, so the narrative says
+  "bottom because of the July drop", not "persistently weak".
+- Groups under 8 masters (incl. the fund) show a rank ("4 of 5") instead of a percentile, and
+  the bottom flag there means last place only.
+- FX per currency: the master's share-class currency from the SEC investment policy / master
+  name, else the category's region (Japan → JPY, Europe → EUR, A-shares → CNY, Greater China →
+  HKD), else USD. FX-adjusted peers use the peer's currency. CNY/THB via the USD cross rate.
+- Watchlist ("ควรจับตา"): ONE entry per holding listing every reason that applies.
+- −10% rule: P&L on the open lots' cost basis, the same definition as the Holdings page
+  (a switched-in lot keeps its original cost).
+- Price proxies removed (chunk 5); the LLM is now called for proxies only as the news fallback.
 - Theme groups: masters the two models disagree on are left out (counted at category level);
   passive plain broad-index funds get the broad theme by rule — never an index that carves
   out a country (ex-US, ex-China…), except "ex Japan" in Asia Pacific Ex Japan.

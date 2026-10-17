@@ -85,7 +85,6 @@ def test_parse_rss_cleans_html_and_skips_incomplete_items():
 # ── proxies ───────────────────────────────────────────────────────────────────
 
 LLM_PROXIES = {
-    "price_proxies": [{"ticker": "smh", "name": "VanEck Semiconductor ETF", "reason": "tracks benchmark"}],
     "news_proxies": [{"ticker": "NVDA", "name": "NVIDIA", "reason": "top holding"},
                      {"ticker": "SOXX", "name": "iShares Semi", "reason": "theme"}],
 }
@@ -177,7 +176,7 @@ class TestRefreshProxies:
         assert result["updated"] == 1 and result["errors"] == []
         rows = (await db.execute(select(FundProxy).order_by(FundProxy.kind, FundProxy.ticker))).scalars().all()
         assert [(r.kind, r.ticker, r.source, r.valid) for r in rows] == [
-            ("news", "NVDA", "ai", True), ("news", "SOXX", "ai", True), ("price", "SMH", "ai", True)]
+            ("news", "NVDA", "ai", True), ("news", "SOXX", "ai", True)]
         assert (await db.execute(select(SyncJob))).scalar_one().type == "fund_proxies"
 
     @pytest.mark.asyncio
@@ -242,13 +241,20 @@ class TestRefreshProxies:
     @pytest.mark.asyncio
     async def test_manual_kind_is_never_replaced(self, db):
         db.add(_fund())
-        db.add(FundProxy(sec_proj_id="P1", kind="price", ticker="^GSPC", source="manual", valid=True))
+        db.add(FundProxy(sec_proj_id="P1", kind="news", ticker="SONY", source="manual", valid=True))
         await db.commit()
-        await self._run(db, force=True)
-        price = (await db.execute(select(FundProxy).where(FundProxy.kind == "price"))).scalars().all()
-        assert [(p.ticker, p.source) for p in price] == [("^GSPC", "manual")]
+        result, llm = await self._run(db, force=True)
         news = (await db.execute(select(FundProxy).where(FundProxy.kind == "news"))).scalars().all()
-        assert {p.ticker for p in news} == {"NVDA", "SOXX"}
+        assert [(p.ticker, p.source) for p in news] == [("SONY", "manual")]
+        llm.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_llm_call_when_holdings_give_news_tickers(self, db):
+        db.add(_fund(management_style="OT", top_holdings=[
+            {"name": "MICRON TECHNOLOGY INC", "pct": 9.8}, {"name": "NVIDIA CORP", "pct": 9.1}]))
+        await db.commit()
+        _, llm = await self._run(db, search=_search)
+        llm.assert_not_awaited()                                      # price proxies gone → LLM only as fallback
 
     @pytest.mark.asyncio
     async def test_invalid_ticker_stored_as_invalid(self, db):
@@ -264,7 +270,7 @@ class TestRefreshProxies:
         await self._run(db)
         result, _ = await self._run(db, llm=AsyncMock(side_effect=LlmError("down")), force=True)
         assert "down" in result["errors"][0]
-        assert len((await db.execute(select(FundProxy))).scalars().all()) == 3
+        assert len((await db.execute(select(FundProxy))).scalars().all()) == 2
 
     @pytest.mark.asyncio
     async def test_set_manual_and_clear(self, db):
@@ -278,7 +284,7 @@ class TestRefreshProxies:
 
 
 @pytest.mark.asyncio
-async def test_validate_rejects_index_for_news_and_short_price_history():
+async def test_validate_rejects_index_and_quiet_tickers_for_news():
     now = datetime.now(timezone.utc)
     busy = [{"published_at": now - timedelta(days=d)} for d in (1, 2, 3)]
     quiet = [{"published_at": now - timedelta(days=d)} for d in (1, 30, 40)]
@@ -287,9 +293,6 @@ async def test_validate_rejects_index_for_news_and_short_price_history():
         assert await proxy_service.validate("news", "SONY") == (True, None)
     with patch("app.services.yahoo_client.rss", new=AsyncMock(return_value=quiet)):
         assert await proxy_service.validate("news", "EWJ") == (False, None)   # too little recent news
-    short = [(date(2026, 10, 15), 1.0)]
-    with patch("app.services.yahoo_client.history", new=AsyncMock(return_value=short)):
-        assert await proxy_service.validate("price", "000688.SS") == (False, 1)
 
 
 # ── news collection ───────────────────────────────────────────────────────────
@@ -430,11 +433,12 @@ class TestMarketApi:
     @pytest.mark.asyncio
     async def test_put_then_get_proxies(self, db, admin_client):
         with patch("app.services.proxy_service.validate", new=AsyncMock(return_value=(True, 500))):
-            r = admin_client.put("/api/v1/funds/F-SSF/proxies/price", json={"tickers": ["smh"]})
+            r = admin_client.put("/api/v1/funds/F-SSF/proxies/news", json={"tickers": ["nvda"]})
         assert r.status_code == 200, r.text
-        assert r.json()[0]["ticker"] == "SMH" and r.json()[0]["source"] == "manual"
+        assert r.json()[0]["ticker"] == "NVDA" and r.json()[0]["source"] == "manual"
         got = admin_client.get("/api/v1/funds/F-SSF/proxies").json()
-        assert [(p["kind"], p["ticker"], p["verified"]) for p in got] == [("price", "SMH", True)]
+        assert [(p["kind"], p["ticker"], p["verified"]) for p in got] == [("news", "NVDA", True)]
+        assert admin_client.put("/api/v1/funds/F-SSF/proxies/price", json={"tickers": ["SMH"]}).status_code == 422
 
     @pytest.mark.asyncio
     async def test_llm_fallback_is_flagged_unverified(self, db, admin_client):
@@ -449,10 +453,10 @@ class TestMarketApi:
         with patch("app.services.proxy_service.validate", new=AsyncMock(return_value=(True, None))):
             fresh = admin_client.put("/api/v1/funds/F-SSF/proxies/news", json={
                 "tickers": ["NVDA"], "source_note": "Master factsheet", "source_as_of": date.today().isoformat()})
-            old = admin_client.put("/api/v1/funds/F-SSF/proxies/price", json={
+            assert fresh.json()[0]["source_note"] == "Master factsheet"
+            assert fresh.json()[0]["override_stale"] is False
+            old = admin_client.put("/api/v1/funds/F-SSF/proxies/news", json={
                 "tickers": ["SMH"], "source_as_of": (date.today() - timedelta(days=120)).isoformat()})
-        assert fresh.json()[0]["source_note"] == "Master factsheet"
-        assert fresh.json()[0]["override_stale"] is False
         assert old.json()[0]["override_stale"] is True
 
     @pytest.mark.asyncio
